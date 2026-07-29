@@ -1,0 +1,15 @@
+# Secrets — MUST never be uploaded to Vercel (CLI uploads by THIS file, not .gitignore)
+credentials/
+.env
+.env.*
+!.env.example
+
+# Local / dev cruft
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.git/
+.vercel/
+scratchpad/

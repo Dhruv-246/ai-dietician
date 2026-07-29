@@ -1,0 +1,50 @@
+# ---- Secrets & credentials ----
+# Google service-account JSON and any other credentials
+credentials/
+*.json.key
+service-account*.json
+gcp-*.json
+
+# Environment / secret config
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Node (if used for frontend/voice) ----
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ---- Editors / OS ----
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.log
+
+# ---- Local data / caches ----
+*.sqlite
+*.db
+.cache/
+tmp/
+
+# ---- Vercel ----
+.vercel/
