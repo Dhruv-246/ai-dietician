@@ -23,8 +23,21 @@ def _load_credentials() -> Credentials:
       1. GOOGLE_CREDENTIALS_JSON  -> from_service_account_info (production/Vercel)
       2. GOOGLE_APPLICATION_CREDENTIALS file path -> from_service_account_file (local)
     """
-    if config.GOOGLE_CREDENTIALS_JSON:
-        info = json.loads(config.GOOGLE_CREDENTIALS_JSON)
+    raw = config.GOOGLE_CREDENTIALS_JSON
+    if raw:
+        raw = raw.strip()
+        # Tolerate a value accidentally wrapped in surrounding quotes.
+        if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"":
+            raw = raw[1:-1].strip()
+        try:
+            info = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "GOOGLE_CREDENTIALS_JSON is set but is not valid JSON. Paste the "
+                "ENTIRE contents of the service-account JSON file as the value "
+                "(not a file path, no surrounding quotes). JSON parse error: "
+                f"{exc}"
+            ) from exc
         return Credentials.from_service_account_info(info, scopes=SCOPES)
     return Credentials.from_service_account_file(
         config.CREDENTIALS_PATH, scopes=SCOPES

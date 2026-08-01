@@ -33,6 +33,24 @@ def chat(messages: list[dict]) -> str:
         json=payload,
         timeout=_TIMEOUT_SECONDS,
     )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"]["content"].strip()
+
+    # Surface OpenRouter HTTP errors with their body (e.g. invalid key, 402, 429).
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"OpenRouter API error {resp.status_code}: {resp.text[:300]}"
+        )
+
+    try:
+        data = resp.json()
+    except ValueError as exc:  # non-JSON body
+        raise RuntimeError(
+            f"OpenRouter returned a non-JSON response (status {resp.status_code}): "
+            f"{resp.text[:200]}"
+        ) from exc
+
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(
+            f"Unexpected OpenRouter response shape: {str(data)[:300]}"
+        ) from exc
