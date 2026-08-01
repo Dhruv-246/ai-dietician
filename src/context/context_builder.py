@@ -15,6 +15,8 @@ Final context shape (OpenAI/OpenRouter chat format):
 """
 from __future__ import annotations
 
+import json
+
 from src import config
 from src.context import food_matcher, prompt_loader
 from src.data import repositories
@@ -28,23 +30,46 @@ _LANGUAGE_GUIDANCE = (
     "the same casual mix. Keep replies short and natural for speaking aloud."
 )
 
-# Profile fields surfaced to the model, in a sensible order. Safety-critical
-# fields (allergies, medical_conditions) are included and never dropped.
+# Profile fields surfaced to the model, in a sensible order. Matches the Users
+# sheet schema. Safety-critical fields (allergies, conditions) are always
+# included. Labels are the human-friendly names shown to the model.
 _PROFILE_FIELDS = [
-    "name", "age", "gender", "height_cm", "weight_kg",
-    "goal", "diet_type", "activity_level", "allergies", "medical_conditions",
+    ("name", "name"),
+    ("age", "age"),
+    ("sex", "sex"),
+    ("height_cm", "height (cm)"),
+    ("weight_kg", "weight (kg)"),
+    ("diet", "diet"),
+    ("allergies", "allergies"),
+    ("conditions", "health conditions"),
 ]
+
+# Fields stored as JSON arrays in the sheet.
+_LIST_FIELDS = {"allergies", "conditions"}
+
+
+def _readable_value(field: str, raw: str) -> str:
+    """Turn a stored cell into readable text; JSON arrays -> comma list."""
+    raw = str(raw).strip()
+    if field in _LIST_FIELDS:
+        try:
+            items = json.loads(raw)
+            if isinstance(items, list):
+                return ", ".join(str(x) for x in items) if items else "none"
+        except (ValueError, TypeError):
+            pass
+    return raw
 
 
 def _format_profile(user: dict | None) -> str:
-    """Render the user profile as a compact key: value block."""
+    """Render the authenticated user's profile as a compact key: value block."""
     if not user:
         return "USER PROFILE:\n(No profile found for this user.)"
     lines = ["USER PROFILE:"]
-    for field in _PROFILE_FIELDS:
-        value = str(user.get(field, "")).strip()
+    for field, label in _PROFILE_FIELDS:
+        value = _readable_value(field, user.get(field, ""))
         if value:
-            lines.append(f"- {field}: {value}")
+            lines.append(f"- {label}: {value}")
     return "\n".join(lines)
 
 

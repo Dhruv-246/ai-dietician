@@ -45,6 +45,19 @@ HISTORY_LIMIT = 20
 WEB_PORT = int(os.environ.get("WEB_PORT", "5050"))
 DEFAULT_USER_ID = os.environ.get("DEFAULT_USER_ID", "U001")
 
+# --- Firebase (client-side auth config) ---
+# These are the Firebase *web app* config values. They are NOT secrets — the
+# web SDK is designed to expose them in the browser. We read them from env so
+# nothing is hardcoded and they can be set per environment (local / Vercel).
+FIREBASE_CONFIG = {
+    "apiKey": os.environ.get("FIREBASE_API_KEY"),
+    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN"),
+    "projectId": os.environ.get("FIREBASE_PROJECT_ID"),
+    "appId": os.environ.get("FIREBASE_APP_ID"),
+    "messagingSenderId": os.environ.get("FIREBASE_MESSAGING_SENDER_ID"),
+    "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET"),
+}
+
 
 def _resolve_credentials_path() -> str:
     """Return an absolute path to the service-account JSON.

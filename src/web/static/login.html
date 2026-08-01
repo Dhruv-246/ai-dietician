@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Log in — Mira</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="auth-wrap">
+    <div class="auth-card">
+      <div class="brand">
+        <span class="brand-mark">🥗</span>
+        <h1>Mira</h1>
+      </div>
+      <p class="role-line">Your AI Dietician</p>
+      <h2 class="auth-title">Welcome back</h2>
+
+      <form id="login-form" class="auth-form" novalidate>
+        <label class="field">
+          <span>Email</span>
+          <input id="email" type="email" autocomplete="email" required placeholder="you@example.com" />
+        </label>
+        <label class="field">
+          <span>Password</span>
+          <input id="password" type="password" autocomplete="current-password" required placeholder="••••••••" />
+        </label>
+        <p id="error" class="auth-error hidden"></p>
+        <button id="submit" type="submit" class="auth-btn">Log in</button>
+      </form>
+
+      <p class="auth-alt">Don't have an account? <a href="/signup">Sign up</a></p>
+    </div>
+  </main>
+
+  <script type="module" src="js/login.js"></script>
+</body>
+</html>

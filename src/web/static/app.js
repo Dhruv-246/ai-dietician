@@ -122,10 +122,17 @@ async function sendToBackend(message) {
   setState("thinking", "Thinking…");
   els.aiBubble.classList.add("hidden");
   try {
+    // Identify the user by their Firebase token (set by guard.js), not a
+    // client-supplied id — the backend resolves the row from firebase_uid.
+    if (!window.__miraGetToken) throw new Error("not signed in");
+    const token = await window.__miraGetToken();
     const res = await fetch("/api/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: USER_ID, message }),
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + token,
+      },
+      body: JSON.stringify({ message }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
