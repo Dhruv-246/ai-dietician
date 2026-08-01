@@ -17,7 +17,7 @@ from src.conversation import run_turn
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
-AI_NAME = "AI Dietician"
+AI_NAME = "Mira"
 
 
 @app.get("/")

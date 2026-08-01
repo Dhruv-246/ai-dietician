@@ -19,6 +19,15 @@ from src import config
 from src.context import food_matcher, prompt_loader
 from src.data import repositories
 
+# Language steering for the voice demo. Kept here (not in system_prompt.md) so
+# the prompt file stays language-neutral. Tells the model to mirror the user's
+# language, including Hindi / Hinglish, and to stay speech-friendly.
+_LANGUAGE_GUIDANCE = (
+    "LANGUAGE: Reply in the SAME language the user speaks. If they use Hindi, "
+    "reply in natural Hindi; if they mix Hindi and English (Hinglish), reply in "
+    "the same casual mix. Keep replies short and natural for speaking aloud."
+)
+
 # Profile fields surfaced to the model, in a sensible order. Safety-critical
 # fields (allergies, medical_conditions) are included and never dropped.
 _PROFILE_FIELDS = [
@@ -91,6 +100,7 @@ def build_context(user_id: str, user_message: str) -> list[dict]:
 
     # 5. Assemble.
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    messages.append({"role": "system", "content": _LANGUAGE_GUIDANCE})
     messages.append({"role": "system", "content": _format_profile(user)})
 
     food_block = _format_food_data(relevant_foods)

@@ -66,7 +66,8 @@ async function boot() {
 /* ---------- Speech-to-Text ---------- */
 function setupRecognition(SR) {
   recognition = new SR();
-  recognition.lang = "en-US";
+  // hi-IN recognizes Hindi and handles common Hindi+English (Hinglish) speech.
+  recognition.lang = "hi-IN";
   recognition.interimResults = true;
   recognition.continuous = false;
   recognition.maxAlternatives = 1;
@@ -136,13 +137,28 @@ async function sendToBackend(message) {
 }
 
 /* ---------- Text-to-Speech ---------- */
-function pickVoice() {
+// Detect Devanagari (Hindi) characters so we can pick a matching voice/lang.
+function isHindi(text) {
+  return /[ऀ-ॿ]/.test(text);
+}
+
+function pickVoice(hindi) {
   const voices = window.speechSynthesis.getVoices();
-  const prefer = [
+  if (hindi) {
+    const hiPrefer = ["Google हिन्दी", "Lekha", "Kiara", "Microsoft Swara Online"];
+    for (const name of hiPrefer) {
+      const v = voices.find((x) => x.name === name);
+      if (v) return v;
+    }
+    const hi = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith("hi"));
+    if (hi) return hi;
+    // Fall through to English if no Hindi voice is installed.
+  }
+  const enPrefer = [
     "Google US English", "Samantha", "Microsoft Aria Online",
     "Microsoft Jenny Online", "Karen", "Daniel",
   ];
-  for (const name of prefer) {
+  for (const name of enPrefer) {
     const v = voices.find((x) => x.name === name);
     if (v) return v;
   }
@@ -155,9 +171,11 @@ function speak(text) {
     return;
   }
   window.speechSynthesis.cancel();
+  const hindi = isHindi(text);
   const utter = new SpeechSynthesisUtterance(text);
-  const voice = pickVoice();
+  const voice = pickVoice(hindi);
   if (voice) utter.voice = voice;
+  utter.lang = hindi ? "hi-IN" : "en-US";
   utter.rate = 1.0;
   utter.pitch = 1.0;
 
