@@ -37,6 +37,34 @@ body {
   text-align: center;
 }
 
+/* Chat page: top-aligned, full height, room reserved for the sticky dock. */
+body.chat-page { display: block; padding: 0; }
+body.chat-page .app {
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0 auto;
+  justify-content: flex-start;
+  gap: 18px;
+  padding: 22px 20px 210px; /* bottom padding clears the fixed dock */
+}
+
+/* Sticky controls dock — mic + text input pinned to the bottom. */
+.dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px calc(18px + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(to top, var(--bg-1) 62%, rgba(15, 31, 26, 0.85) 88%, transparent);
+  backdrop-filter: blur(6px);
+}
+.dock .footer { min-height: 0; }
+
 /* Header */
 .brand { display: flex; align-items: center; gap: 12px; justify-content: center; }
 .brand-mark { font-size: 34px; }
@@ -80,7 +108,8 @@ body {
   width: 132px;
   height: 132px;
   border-radius: 50%;
-  background-image: url("Mira_image.jpg");
+  background-image: url("/Mira_image.jpg");
+  background-color: #223; /* fallback tint if the image is still loading */
   background-size: 140%;
   background-position: center 18%;
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.1), 0 12px 40px rgba(0, 0, 0, 0.5);
