@@ -25,9 +25,11 @@ from src.data import repositories
 # the prompt file stays language-neutral. Tells the model to mirror the user's
 # language, including Hindi / Hinglish, and to stay speech-friendly.
 _LANGUAGE_GUIDANCE = (
-    "LANGUAGE: Reply in the SAME language the user speaks. If they use Hindi, "
-    "reply in natural Hindi; if they mix Hindi and English (Hinglish), reply in "
-    "the same casual mix. Keep replies short and natural for speaking aloud."
+    "LANGUAGE: Default to Hinglish in Roman script — NEVER Devanagari. Mirror the "
+    "user: Hinglish -> full Hinglish; pure English -> mostly natural English; heavy "
+    "Hindi -> lean more Hindi but keep nutrition words (protein, calories, sugar, "
+    "etc.) and all numbers in English. Keep replies short and natural for speaking "
+    "aloud."
 )
 
 # Profile fields surfaced to the model, in a sensible order. Matches the Users
