@@ -148,6 +148,32 @@ def user_profile():
     return jsonify({"ok": True})
 
 
+@app.get("/api/user/context")
+def user_context():
+    """Return the signed-in user's display name + their last 10 messages.
+
+    Used by the chat screen on load to show "Welcome <name>" and replay the
+    recent conversation. Identity comes from the verified token (own data only).
+    """
+    claims, err = _verify_firebase_request()
+    if err:
+        return err
+    firebase_uid = claims.get("sub") or claims.get("user_id")
+    user = repositories.get_user_by_firebase_uid(firebase_uid) if firebase_uid else None
+    if not user:
+        return jsonify({"name": "", "messages": [], "ai_name": AI_NAME})
+
+    user_id = str(user.get("user_id", "")).strip()
+    name = str(user.get("name", "")).strip()
+    recent = repositories.get_recent_history(user_id, 10)
+    messages = [
+        {"role": str(r.get("role", "")).strip().lower(),
+         "message": str(r.get("message", "")).strip()}
+        for r in recent if str(r.get("message", "")).strip()
+    ]
+    return jsonify({"name": name, "messages": messages, "ai_name": AI_NAME})
+
+
 @app.post("/api/chat")
 def chat():
     """Run one conversation turn for the AUTHENTICATED user.

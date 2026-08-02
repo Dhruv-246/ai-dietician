@@ -41,6 +41,8 @@ if (auth) {
     window.__miraGetToken = () => user.getIdToken();
     // Authenticated + onboarded: reveal the chat UI.
     document.body.classList.add("authed");
+    // Token is ready -> load "Welcome <name>" + the last 10 messages.
+    if (window.__miraInit) window.__miraInit();
   });
 
   const logoutBtn = document.getElementById("logout-btn");

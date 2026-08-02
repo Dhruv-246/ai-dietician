@@ -13,10 +13,8 @@ const els = {
   orb: document.getElementById("orb"),
   status: document.getElementById("status"),
   micBtn: document.getElementById("mic-btn"),
-  userBubble: document.getElementById("user-bubble"),
-  userText: document.getElementById("user-text"),
-  aiBubble: document.getElementById("ai-bubble"),
-  aiText: document.getElementById("ai-text"),
+  messages: document.getElementById("messages"),
+  welcome: document.getElementById("welcome"),
   stopSpeak: document.getElementById("stop-speak"),
   compat: document.getElementById("compat-note"),
   textForm: document.getElementById("text-form"),
@@ -36,14 +34,64 @@ function setState(next, message) {
   if (message) els.status.textContent = message;
 }
 
+/* ---------- Conversation log ---------- */
+function scrollMessages() {
+  els.messages.scrollTop = els.messages.scrollHeight;
+}
+function appendBubble(role, text) {
+  const wrap = document.createElement("div");
+  wrap.className = "bubble " + (role === "assistant" ? "ai" : "user");
+  const label = document.createElement("span");
+  label.className = "label";
+  label.textContent = role === "assistant" ? "Mira" : "You";
+  const p = document.createElement("p");
+  p.textContent = text;
+  wrap.append(label, p);
+  els.messages.appendChild(wrap);
+  scrollMessages();
+  return p; // returned so live transcription can update it in place
+}
+
+// One "live" user bubble is reused while speech is being transcribed.
+let livePara = null;
 function showUser(text) {
-  els.userText.textContent = text;
-  els.userBubble.classList.remove("hidden");
+  if (!livePara) livePara = appendBubble("user", text);
+  else { livePara.textContent = text; scrollMessages(); }
+}
+function commitUser(text) {
+  if (livePara) { livePara.textContent = text; livePara = null; }
+  else appendBubble("user", text);
 }
 function showAI(text) {
-  els.aiText.textContent = text;
-  els.aiBubble.classList.remove("hidden");
+  appendBubble("assistant", text);
 }
+
+/* Load "Welcome <name>" and replay the last 10 messages on login. */
+async function loadUserContext() {
+  if (!window.__miraGetToken) return;
+  try {
+    const token = await window.__miraGetToken();
+    const res = await fetch("/api/user/context", {
+      headers: { Authorization: "Bearer " + token },
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.ai_name) els.aiName.textContent = data.ai_name;
+    if (data.name) {
+      els.welcome.textContent = "Welcome, " + data.name;
+      els.welcome.classList.remove("hidden");
+    }
+    if (Array.isArray(data.messages) && data.messages.length) {
+      els.messages.innerHTML = "";
+      for (const m of data.messages) {
+        appendBubble(m.role === "assistant" ? "assistant" : "user", m.message);
+      }
+      scrollMessages();
+    }
+  } catch (_) { /* non-fatal */ }
+}
+// Called by guard.js once the user is authenticated and the token is ready.
+window.__miraInit = loadUserContext;
 
 /* ---------- Bootstrap ---------- */
 async function boot() {
@@ -128,7 +176,7 @@ function setupRecognition(SR) {
     els.micBtn.classList.remove("recording");
     const text = finalTranscript.trim();
     if (text) {
-      showUser(text);
+      commitUser(text);
       sendToBackend(text);
     } else if (state === "listening") {
       setState("idle", "Tap the mic to start talking");
@@ -139,7 +187,6 @@ function setupRecognition(SR) {
 /* ---------- Backend call ---------- */
 async function sendToBackend(message) {
   setState("thinking", "Thinking…");
-  els.aiBubble.classList.add("hidden");
   try {
     // Identify the user by their Firebase token (set by guard.js), not a
     // client-supplied id — the backend resolves the row from firebase_uid.
@@ -334,7 +381,7 @@ if (els.textForm) {
     if (!msg) return;
     warmUpTTS(); // unlock TTS within this user gesture
     els.textInput.value = "";
-    showUser(msg);
+    commitUser(msg);
     sendToBackend(msg);
   });
 }

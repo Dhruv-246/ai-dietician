@@ -17,6 +17,7 @@
         <h1 id="ai-name">Mira</h1>
       </div>
       <p class="role-line">Your AI Dietician</p>
+      <h2 id="welcome" class="welcome hidden"></h2>
       <p class="subtitle">Your personal nutrition companion — just talk to me.</p>
     </header>
 
@@ -51,17 +52,8 @@
       </button>
     </form>
 
-    <!-- Transcripts -->
-    <section class="transcript">
-      <div id="user-bubble" class="bubble user hidden">
-        <span class="label">You</span>
-        <p id="user-text"></p>
-      </div>
-      <div id="ai-bubble" class="bubble ai hidden">
-        <span class="label">Dietician</span>
-        <p id="ai-text"></p>
-      </div>
-    </section>
+    <!-- Conversation log: last 10 messages load here on login, new ones append -->
+    <section class="transcript" id="messages"></section>
 
     <footer class="footer">
       <button id="stop-speak" class="ghost-btn hidden">Stop speaking</button>

@@ -57,6 +57,13 @@ body {
   letter-spacing: 0.14em;
   margin-top: 6px;
 }
+.welcome {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-top: 10px;
+  color: var(--text);
+}
 .subtitle { color: var(--text-dim); font-size: 15px; margin-top: 4px; }
 
 /* Stage / orb */
@@ -192,8 +199,17 @@ body {
 .text-send:hover { transform: translateY(-1px); }
 .text-send:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Transcript bubbles */
-.transcript { width: 100%; display: flex; flex-direction: column; gap: 12px; }
+/* Transcript / conversation log */
+.transcript {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.transcript:empty { display: none; }
 .bubble {
   background: var(--bubble-bg);
   border: 1px solid rgba(255, 255, 255, 0.08);
