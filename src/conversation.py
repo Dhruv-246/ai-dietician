@@ -15,10 +15,14 @@ from src.data import repositories
 from src.llm import openrouter_client
 
 
-def run_turn(user_id: str, message: str) -> str:
-    """Run one full turn and return the assistant's reply."""
+def run_turn(user_id: str, message: str, voice: bool = False) -> str:
+    """Run one full turn and return the assistant's reply.
+
+    voice=True selects the spoken agent's Devanagari mixed-script output; the
+    web/voice endpoint sets this. The CLI/text path leaves it False (Roman).
+    """
     # 1. Build the context (existing, unchanged logic).
-    messages = context_builder.build_context(user_id, message)
+    messages = context_builder.build_context(user_id, message, voice=voice)
 
     # 2. Ask the LLM.
     reply = openrouter_client.chat(messages)

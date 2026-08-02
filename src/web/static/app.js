@@ -155,61 +155,134 @@ function isHindi(text) {
   return /[ऀ-ॿ]/.test(text);
 }
 
-function pickVoice(hindi) {
-  const voices = window.speechSynthesis.getVoices();
-  if (hindi) {
-    const hiPrefer = ["Google हिन्दी", "Lekha", "Kiara", "Microsoft Swara Online"];
-    for (const name of hiPrefer) {
-      const v = voices.find((x) => x.name === name);
-      if (v) return v;
-    }
-    const hi = voices.find((v) => v.lang && v.lang.toLowerCase().startsWith("hi"));
-    if (hi) return hi;
-    // Fall through to English if no Hindi voice is installed.
-  }
-  const enPrefer = [
-    "Google US English", "Samantha", "Microsoft Aria Online",
-    "Microsoft Jenny Online", "Karen", "Daniel",
-  ];
-  for (const name of enPrefer) {
-    const v = voices.find((x) => x.name === name);
-    if (v) return v;
-  }
-  return voices.find((v) => v.lang && v.lang.startsWith("en")) || voices[0] || null;
+/* Voice cache — getVoices() is empty on first call in Chrome and only fills
+ * after the 'voiceschanged' event. We cache voices there so pickVoice() never
+ * silently falls back to the default US voice due to that race. */
+let voicesCache = [];
+function loadVoices() {
+  if (!("speechSynthesis" in window)) return;
+  const v = window.speechSynthesis.getVoices();
+  if (v && v.length) voicesCache = v;
+}
+if ("speechSynthesis" in window) {
+  window.speechSynthesis.onvoiceschanged = loadVoices;
+  loadVoices();
 }
 
+/* Format the LLM reply for speech (not for reading):
+ * strip markdown, remove emoji, expand units to words, soften dashes. */
+function formatForSpeech(text) {
+  let t = String(text || "");
+  // Remove emoji / pictographs / variation selectors.
+  t = t.replace(
+    /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{2190}-\u{21FF}\u{FE0F}\u{200D}]/gu,
+    ""
+  );
+  // Markdown: code fences/inline, bold/italic markers, headings, quotes, links, rules.
+  t = t.replace(/```[\s\S]*?```/g, " ").replace(/`([^`]*)`/g, "$1");
+  t = t.replace(/\*\*(.*?)\*\*/g, "$1").replace(/\*(.*?)\*/g, "$1");
+  t = t.replace(/__(.*?)__/g, "$1").replace(/_(.*?)_/g, "$1");
+  t = t.replace(/^#{1,6}\s+/gm, "").replace(/^\s*>\s?/gm, "");
+  t = t.replace(/^\s*[-*•]\s+/gm, "");          // list bullets
+  t = t.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1"); // [text](url) -> text
+  t = t.replace(/^\s*[-–—]{3,}\s*$/gm, " ");     // horizontal rules
+  // Number ranges "10–20" -> "10 to 20" (before dash softening).
+  t = t.replace(/(\d)\s*[–—-]\s*(\d)/g, "$1 to $2");
+  // Units -> spoken words (kg/mg before g; keep the digit for the voice to read).
+  t = t.replace(/(\d+(?:\.\d+)?)\s*kcal\b/gi, "$1 calories");
+  t = t.replace(/(\d+(?:\.\d+)?)\s*cal\b/gi, "$1 calories");
+  t = t.replace(/(\d+(?:\.\d+)?)\s*kg\b/gi, "$1 kilograms");
+  t = t.replace(/(\d+(?:\.\d+)?)\s*mg\b/gi, "$1 milligrams");
+  t = t.replace(/(\d+(?:\.\d+)?)\s*g\b/gi, "$1 grams");
+  t = t.replace(/(\d+(?:\.\d+)?)\s*ml\b/gi, "$1 millilitre");
+  t = t.replace(/(\d+(?:\.\d+)?)\s*[lL]\b/g, "$1 litre");
+  t = t.replace(/(\d+(?:\.\d+)?)\s*min\b/gi, "$1 minutes");
+  t = t.replace(/(\d+(?:\.\d+)?)\s*hrs?\b/gi, "$1 hours");
+  // Clause dashes (spaced) -> comma pause; newlines -> sentence breaks.
+  t = t.replace(/\s+[–—-]\s+/g, ", ");
+  t = t.replace(/\s*\n+\s*/g, ". ");
+  // Tidy whitespace and collapse repeated/stray punctuation.
+  t = t.replace(/\s+([,.!?])/g, "$1");
+  t = t.replace(/([,.!?])(?:\s*[,.!?])+/g, "$1 ");
+  t = t.replace(/\s{2,}/g, " ").trim();
+  return t;
+}
+
+function pickVoice(hindi) {
+  const voices = (voicesCache && voicesCache.length)
+    ? voicesCache
+    : (("speechSynthesis" in window && window.speechSynthesis.getVoices()) || []);
+  const byName = (names) => {
+    for (const n of names) {
+      const v = voices.find((x) => x.name === n);
+      if (v) return v;
+    }
+    return null;
+  };
+  const byLang = (prefix) =>
+    voices.find((v) => v.lang && v.lang.toLowerCase().startsWith(prefix)) || null;
+
+  if (hindi) {
+    return byName(["Google हिन्दी", "Microsoft Swara Online", "Lekha", "Kiara"])
+      || byLang("hi")
+      // No Hindi voice installed -> still prefer an Indian-accent voice.
+      || byName(["Rishi"]) || byLang("en-in")
+      || voices[0] || null;
+  }
+  // English: Indian English first, then UK, then any non-US en; US voice is last.
+  return byName(["Rishi", "Heera", "Ravi"])
+    || byLang("en-in")
+    || byName(["Google UK English"]) || byLang("en-gb")
+    || voices.find((v) => v.lang && v.lang.toLowerCase().startsWith("en")
+                          && v.lang.toLowerCase() !== "en-us")
+    || byLang("en")
+    || voices[0] || null;
+}
+
+/* TTS PROVIDER SEAM — the only browser-specific speech code lives here.
+ * To move TTS server-side later, replace the body of speakWithProvider() with a
+ * fetch to your TTS endpoint (send `text`, play the returned audio, call the
+ * same handlers). Nothing else in app.js needs to change. */
+function speakWithProvider(text, hindi, handlers) {
+  const utter = new SpeechSynthesisUtterance(text);
+  const voice = pickVoice(hindi);
+  if (voice) utter.voice = voice;
+  utter.lang = hindi ? "hi-IN" : (voice && voice.lang ? voice.lang : "en-IN");
+  utter.rate = 0.95; // 1.0 is slightly fast for code-mixed speech
+  utter.pitch = 1.0;
+  // Debug: shows exactly which voice/lang is used for each utterance.
+  console.log(
+    `[Mira TTS] voice="${voice ? voice.name : "(default)"}" lang="${utter.lang}" hindi=${hindi}`
+  );
+  utter.onstart = handlers.onstart;
+  utter.onend = handlers.onend;
+  utter.onerror = handlers.onerror;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utter);
+}
+
+/* Handoff: sanitize the reply, choose script, hand to the TTS provider. */
 function speak(text) {
   if (!("speechSynthesis" in window)) {
     setState("idle", "Tap the mic to continue");
     return;
   }
-  window.speechSynthesis.cancel();
-  const hindi = isHindi(text);
-  const utter = new SpeechSynthesisUtterance(text);
-  const voice = pickVoice(hindi);
-  if (voice) utter.voice = voice;
-  utter.lang = hindi ? "hi-IN" : "en-US";
-  utter.rate = 1.0;
-  utter.pitch = 1.0;
-
-  utter.onstart = () => {
-    setState("speaking", "Speaking…");
-    els.stopSpeak.classList.remove("hidden");
-  };
-  utter.onend = () => {
-    els.stopSpeak.classList.add("hidden");
-    setState("idle", "Tap the mic to continue the conversation");
-  };
-  utter.onerror = () => {
-    els.stopSpeak.classList.add("hidden");
-    setState("idle", "Tap the mic to continue");
-  };
-  window.speechSynthesis.speak(utter);
-}
-
-/* Some browsers load voices asynchronously. */
-if ("speechSynthesis" in window) {
-  window.speechSynthesis.onvoiceschanged = () => {};
+  const spoken = formatForSpeech(text);
+  const hindi = isHindi(spoken);
+  speakWithProvider(spoken, hindi, {
+    onstart: () => {
+      setState("speaking", "Speaking…");
+      els.stopSpeak.classList.remove("hidden");
+    },
+    onend: () => {
+      els.stopSpeak.classList.add("hidden");
+      setState("idle", "Tap the mic to continue the conversation");
+    },
+    onerror: () => {
+      els.stopSpeak.classList.add("hidden");
+      setState("idle", "Tap the mic to continue");
+    },
+  });
 }
 
 /* ---------- Controls ---------- */

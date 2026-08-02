@@ -121,8 +121,14 @@ def _map_history(history: list[dict]) -> list[dict]:
     return messages
 
 
-def build_context(user_id: str, user_message: str) -> list[dict]:
-    """Assemble the full chat message list for one user turn."""
+def build_context(user_id: str, user_message: str, voice: bool = False) -> list[dict]:
+    """Assemble the full chat message list for one user turn.
+
+    voice=True (spoken agent) swaps the Roman-script language instruction for the
+    Devanagari mixed-script voice overlay so TTS pronounces Hindi words correctly.
+    voice=False (text/CLI agent) keeps Roman-script Hinglish. The base system
+    prompt is shared; only the language instruction differs.
+    """
     # 1. System prompt (loaded fresh from disk each turn).
     system_prompt = prompt_loader.load_system_prompt()
 
@@ -142,7 +148,12 @@ def build_context(user_id: str, user_message: str) -> list[dict]:
     # 6. Assemble in the required order:
     #    system prompt + language + profile + long-term memory + food + history + current
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
-    messages.append({"role": "system", "content": _LANGUAGE_GUIDANCE})
+    if voice:
+        # Voice agent: Devanagari mixed-script overlay (overrides §0 script rule).
+        messages.append({"role": "system", "content": prompt_loader.load_voice_overlay()})
+    else:
+        # Text/CLI agent: Roman-script Hinglish.
+        messages.append({"role": "system", "content": _LANGUAGE_GUIDANCE})
     messages.append({"role": "system", "content": _format_profile(user)})
 
     memory_block = _format_memory(memories)

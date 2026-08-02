@@ -302,6 +302,8 @@ body.authed .auth-loading { display: none; }
 /* ---------- Onboarding wizard ---------- */
 .ob-wrap {
   min-height: 100vh;
+  min-height: 100dvh; /* mobile browser chrome-aware height */
+  width: 100%;
   max-width: 460px;
   margin: 0 auto;
   padding: 20px 22px 40px;
@@ -324,7 +326,9 @@ body.authed .auth-loading { display: none; }
   background: linear-gradient(90deg, var(--accent), #7dd3fc);
   border-radius: 999px; transition: width 0.35s ease;
 }
-.ob-step { display: flex; flex-direction: column; gap: 14px; }
+/* flex:1 + centered = form sits balanced in the viewport, not top-heavy.
+   Tall screens (many chips) still grow the page and scroll naturally. */
+.ob-step { display: flex; flex-direction: column; justify-content: center; flex: 1; gap: 14px; }
 .ob-q { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 6px; }
 .ob-label { font-size: 13px; font-weight: 600; color: var(--text-dim); }
 
@@ -355,7 +359,7 @@ body.authed .auth-loading { display: none; }
 
 /* chips */
 .ob-chips { display: flex; flex-wrap: wrap; gap: 10px; }
-.ob-row { flex-direction: row; }
+.ob-row { display: flex; flex-direction: row; gap: 10px; align-items: center; }
 .ob-grid { gap: 10px; }
 .ob-chip {
   background: rgba(255, 255, 255, 0.05);
@@ -388,22 +392,36 @@ body.authed .auth-loading { display: none; }
 .ob-footer { color: var(--text-dim); font-size: 13px; line-height: 1.5; }
 
 /* height / weight */
-.ob-height .ob-select, .ob-weight .ob-bigfield { flex: 1; }
+/* min-width:0 lets flex children shrink instead of overflowing; width:auto
+   stops .ob-bigfield's global width:100% from shoving the unit toggle on top. */
+.ob-height .ob-select, .ob-weight .ob-bigfield { flex: 1; min-width: 0; }
+.ob-weight .ob-bigfield { width: auto; }
 .ob-select {
   background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 12px; padding: 14px 12px; color: var(--text);
   font-size: 16px; outline: none;
 }
-.ob-weight { align-items: stretch; }
+.ob-weight { align-items: stretch; gap: 10px; }
 .ob-seg {
-  display: flex; border: 1px solid rgba(255, 255, 255, 0.14);
+  display: flex; flex: 0 0 auto; align-items: stretch;
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 12px; overflow: hidden;
 }
 .ob-seg button {
+  display: flex; align-items: center;
   background: transparent; border: none; color: var(--text-dim);
   padding: 0 18px; font-size: 15px; cursor: pointer;
 }
 .ob-seg button.sel { background: var(--accent); color: #04241b; font-weight: 700; }
+
+/* Small-phone tuning: trim padding/sizes so nothing crowds on narrow screens. */
+@media (max-width: 400px) {
+  .ob-wrap { padding: 16px 16px 32px; }
+  .ob-q { font-size: 21px; }
+  .ob-chip { padding: 9px 14px; font-size: 14px; }
+  .ob-card { padding: 14px 15px; }
+  .ob-seg button { padding: 0 14px; }
+}
 
 /* diet cards */
 .ob-cards { display: flex; flex-direction: column; gap: 10px; }

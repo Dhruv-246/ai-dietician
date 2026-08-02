@@ -178,7 +178,8 @@ def chat():
         return jsonify({"error": "user row missing user_id"}), 500
 
     try:
-        reply = run_turn(user_id, message)
+        # This is the spoken agent -> voice=True (Devanagari mixed-script output).
+        reply = run_turn(user_id, message, voice=True)
     except Exception as exc:  # surface a clean error to the UI, no secrets
         return jsonify({"error": str(exc)}), 502
 

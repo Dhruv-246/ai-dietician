@@ -15,6 +15,9 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 # --- Paths ---
 SYSTEM_PROMPT_PATH = PROJECT_ROOT / "prompts" / "system_prompt.md"
+# Voice-only overlay: switches Hindi words to Devanagari for correct TTS
+# pronunciation. Applied only to the spoken agent, not the text/CLI agent.
+VOICE_OVERLAY_PATH = PROJECT_ROOT / "prompts" / "voice_overlay.md"
 
 # --- Google Sheets ---
 # Local dev: path to the service-account JSON file (from_service_account_file).
