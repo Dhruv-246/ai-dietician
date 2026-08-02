@@ -138,6 +138,12 @@ async function sendToBackend(message) {
     if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
     showAI(data.reply);
     speak(data.reply);
+    // Background: extract long-term memory from this exchange. Non-blocking —
+    // does not affect the chat reply or voice playback.
+    fetch("/api/memory/extract", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token },
+    }).catch(() => {});
   } catch (err) {
     setState("error", "Something went wrong: " + err.message);
   }

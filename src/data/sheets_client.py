@@ -66,3 +66,16 @@ def get_worksheet(tab_name: str) -> gspread.Worksheet:
 def get_all_records(tab_name: str) -> list[dict]:
     """Return all rows of a tab as a list of dicts keyed by header names."""
     return get_worksheet(tab_name).get_all_records()
+
+
+def get_or_create_worksheet(tab_name: str, header: list[str]):
+    """Return the worksheet for tab_name, creating it (with header) if missing."""
+    import gspread  # local import to keep module top clean
+
+    ss = _get_spreadsheet()
+    try:
+        return ss.worksheet(tab_name)
+    except gspread.WorksheetNotFound:
+        ws = ss.add_worksheet(title=tab_name, rows=200, cols=max(len(header), 8))
+        ws.append_row(header, value_input_option="RAW")
+        return ws

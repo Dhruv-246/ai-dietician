@@ -15,6 +15,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 
 from src import config
+from src.context import memory_extractor
 from src.conversation import run_turn
 from src.data import repositories
 
@@ -182,6 +183,54 @@ def chat():
         return jsonify({"error": str(exc)}), 502
 
     return jsonify({"reply": reply, "user_id": user_id})
+
+
+@app.post("/api/memory/extract")
+def memory_extract():
+    """Extract durable long-term memories from the user's latest exchange.
+
+    Called by the frontend AFTER a chat reply (background, non-blocking) so chat
+    latency is unchanged. Reads the last exchange from the user's own history,
+    runs LLM extraction for STABLE facts, and upserts (dedup by user_id + key).
+    """
+    claims, err = _verify_firebase_request()
+    if err:
+        return err
+    firebase_uid = claims.get("sub") or claims.get("user_id")
+    if not firebase_uid:
+        return jsonify({"error": "token missing uid"}), 401
+
+    user = repositories.get_user_by_firebase_uid(firebase_uid)
+    if not user:
+        return jsonify({"error": "no user row"}), 404
+    user_id = str(user.get("user_id", "")).strip()
+
+    # Build the latest exchange text from this user's own recent history.
+    recent = repositories.get_recent_history(user_id, 4)
+    if not recent:
+        return jsonify({"stored": 0})
+    exchange = "\n".join(
+        f"{str(r.get('role','')).capitalize()}: {str(r.get('message','')).strip()}"
+        for r in recent if str(r.get("message", "")).strip()
+    )
+    last_user_msg = next(
+        (str(r.get("message", "")).strip() for r in reversed(recent)
+         if str(r.get("role", "")).lower() == "user"), ""
+    )
+    existing = [str(m.get("key", "")).strip() for m in repositories.get_memories(user_id)]
+
+    try:
+        facts = memory_extractor.extract(exchange, existing)
+        stored = 0
+        for f in facts:
+            repositories.upsert_memory(
+                user_id, f["category"], f["key"], f["value"], last_user_msg
+            )
+            stored += 1
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    return jsonify({"stored": stored})
 
 
 def main() -> None:

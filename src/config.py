@@ -36,6 +36,7 @@ TAB_USERS = "users"
 TAB_CONVERSATION_HISTORY = "conversation_history"
 TAB_FOOD_DATA = "food_data"
 TAB_DIET_PLANS = "diet_plans"
+TAB_USER_MEMORY = "User Memory"
 
 # How many recent messages to include as history.
 HISTORY_LIMIT = 20

@@ -73,6 +73,17 @@ def _format_profile(user: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _format_memory(memories: list[dict]) -> str | None:
+    """Render long-term memory as a dedicated block, or None if empty."""
+    values = [str(m.get("value", "")).strip() for m in memories]
+    values = [v for v in values if v]
+    if not values:
+        return None
+    lines = ["LONG TERM USER MEMORY (durable facts about this user):"]
+    lines.extend(f"- {v}" for v in values)
+    return "\n".join(lines)
+
+
 def _format_food_data(rows: list[dict]) -> str | None:
     """Render matched food rows as a readable block, or None if no matches."""
     if not rows:
@@ -113,20 +124,28 @@ def build_context(user_id: str, user_message: str) -> list[dict]:
     # 1. System prompt (loaded fresh from disk each turn).
     system_prompt = prompt_loader.load_system_prompt()
 
-    # 2. User profile.
+    # 2. Permanent user profile.
     user = repositories.get_user(user_id)
 
-    # 3. Recent conversation history (chronological).
+    # 3. Long-term memory (durable facts) for THIS user only.
+    memories = repositories.get_memories(user_id)
+
+    # 4. Recent conversation history (chronological, unchanged: last 20).
     history = repositories.get_recent_history(user_id, config.HISTORY_LIMIT)
 
-    # 4. Relevant food data from the current message only.
+    # 5. Relevant food data from the current message only.
     food_rows = repositories.get_food_data()
     relevant_foods = food_matcher.find_relevant_foods(user_message, food_rows)
 
-    # 5. Assemble.
+    # 6. Assemble in the required order:
+    #    system prompt + language + profile + long-term memory + food + history + current
     messages: list[dict] = [{"role": "system", "content": system_prompt}]
     messages.append({"role": "system", "content": _LANGUAGE_GUIDANCE})
     messages.append({"role": "system", "content": _format_profile(user)})
+
+    memory_block = _format_memory(memories)
+    if memory_block:
+        messages.append({"role": "system", "content": memory_block})
 
     food_block = _format_food_data(relevant_foods)
     if food_block:
