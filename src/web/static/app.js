@@ -19,6 +19,8 @@ const els = {
   aiText: document.getElementById("ai-text"),
   stopSpeak: document.getElementById("stop-speak"),
   compat: document.getElementById("compat-note"),
+  textForm: document.getElementById("text-form"),
+  textInput: document.getElementById("text-input"),
 };
 
 let USER_ID = "U001";
@@ -54,13 +56,30 @@ async function boot() {
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
+    // iPhone/Safari: no mic speech-to-text. Guide the user to type instead.
     els.compat.textContent =
-      "Speech recognition isn't supported in this browser. Please use Chrome or Edge.";
+      "Voice input isn't supported on this device (e.g. iPhone). Type below — " +
+      "or tap the mic on your keyboard to dictate.";
     els.compat.classList.remove("hidden");
     els.micBtn.disabled = true;
+    els.status.textContent = "Type your message to start";
+    if (els.textInput) els.textInput.focus();
     return;
   }
   setupRecognition(SR);
+}
+
+/* iOS blocks speechSynthesis unless first triggered inside a user gesture.
+ * Warm it up on the user's tap so the async reply can be spoken later. */
+let ttsWarmed = false;
+function warmUpTTS() {
+  if (ttsWarmed || !("speechSynthesis" in window)) return;
+  try {
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 0;
+    window.speechSynthesis.speak(u);
+  } catch (_) { /* ignore */ }
+  ttsWarmed = true;
 }
 
 /* ---------- Speech-to-Text ---------- */
@@ -301,9 +320,24 @@ function stopListening() {
 
 els.micBtn.addEventListener("click", () => {
   if (state === "thinking") return; // ignore taps while waiting on the LLM
+  warmUpTTS(); // unlock iOS/Safari audio within this gesture
   if (isListening) stopListening();
   else startListening();
 });
+
+/* Text input fallback — the primary path on iPhone. */
+if (els.textForm) {
+  els.textForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (state === "thinking") return;
+    const msg = (els.textInput.value || "").trim();
+    if (!msg) return;
+    warmUpTTS(); // unlock TTS within this user gesture
+    els.textInput.value = "";
+    showUser(msg);
+    sendToBackend(msg);
+  });
+}
 
 els.stopSpeak.addEventListener("click", () => {
   window.speechSynthesis && window.speechSynthesis.cancel();
