@@ -61,7 +61,7 @@ finally:
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
 # is no .env — the platform injects the variables into the environment directly.
@@ -226,11 +226,22 @@ app = FastAPI(title="Kamya Wellness — Mira onboarding call")
 
 _HERE = Path(__file__).parent
 
+# The product entry point is the WEB app (login / signup / onboarding). The call
+# is step 2 and is only reached AFTER onboarding, via a handoff that carries the
+# user's ?uid=. Opening the bare call URL (no uid) must NOT drop you on the call
+# screen — send you to the web app to sign in / onboard first.
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://web-production-45f0d.up.railway.app/")
 
-@app.get("/", response_class=HTMLResponse)
-@app.get("/call", response_class=HTMLResponse)
-async def call_ui():
-    """The green-start / red-hangup call screen."""
+
+@app.get("/")
+@app.get("/call")
+async def call_ui(request: Request):
+    """The call screen — only shown when arriving from onboarding (has ?uid=).
+
+    Without a uid, redirect to the web app so the user signs in / onboards first.
+    """
+    if not request.query_params.get("uid"):
+        return RedirectResponse(WEB_APP_URL)
     return HTMLResponse((_HERE / "call_ui.html").read_text(encoding="utf-8"))
 
 
