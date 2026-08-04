@@ -363,10 +363,6 @@ async def _run_bot_safe(room_name: str, system_prompt: str):
         print("[mira] traceback:\n" + traceback.format_exc(), flush=True)
 
 
-@app.get("/debug")
-async def debug():
-    """Recent call lifecycle events (no user data) for diagnosing call issues."""
-    return {"events": list(_EVENTS)}
 
 
 def main():
