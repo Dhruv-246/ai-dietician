@@ -1,6 +1,6 @@
 # Kamya Wellness onboarding voice agent (Pipecat). Python 3.10+ (tested on 3.11).
 # Pinned to the version the bot was written/validated against.
-pipecat-ai[sarvam,groq,cartesia,silero,webrtc]==1.7.0
+pipecat-ai[sarvam,groq,cartesia,silero,webrtc,daily]==1.7.0
 
 # Dev runner web server + prebuilt browser client (SmallWebRTC UI at localhost)
 pipecat-ai-prebuilt
