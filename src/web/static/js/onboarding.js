@@ -22,6 +22,11 @@ let currentUser = null;
 let stepIndex = 0;
 const TOTAL = 6;
 
+// The voice onboarding-call service (separate Railway service). After manual
+// onboarding we hand off here with the user's Firebase uid so Mira loads their
+// profile from the same sheet and greets them by name.
+const ONBOARDING_CALL_URL = "https://ai-dietician-production.up.railway.app/";
+
 /* ---------- helpers ---------- */
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) =>
@@ -54,7 +59,13 @@ async function commit(fields, opts = {}) {
     if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label || "Next"; }
     return false;
   }
-  if (opts.finish) { window.location.replace("/"); return true; }
+  if (opts.finish) {
+    // Manual onboarding complete → go to the voice call (step 2), passing the
+    // Firebase uid so the call loads THIS user's profile and greets by name.
+    const uid = encodeURIComponent(currentUser.uid);
+    window.location.replace(ONBOARDING_CALL_URL + "?uid=" + uid);
+    return true;
+  }
   stepIndex += 1;
   render();
   return true;

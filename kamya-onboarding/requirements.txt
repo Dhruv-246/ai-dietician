@@ -10,4 +10,8 @@ livekit-api
 fastapi
 uvicorn
 
+# Read the user's manual-onboarding profile from the shared Google Sheet.
+gspread>=6.0.0
+google-auth>=2.0.0
+
 python-dotenv

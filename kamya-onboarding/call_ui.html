@@ -49,6 +49,8 @@
     .btn svg { width: 34px; height: 34px; fill: #fff; }
     .hidden { display: none !important; }
     .hint { font-size: 13px; color: #8aa596; margin-top: 10px; }
+    .chat-link { margin-top: 14px; font-size: 15px; font-weight: 700; color: #23a95a; text-decoration: none; }
+    .chat-link:hover { text-decoration: underline; }
   </style>
   <!-- LiveKit browser SDK (managed WebRTC — connects reliably from any host) -->
   <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
@@ -75,6 +77,7 @@
     </button>
   </div>
   <div class="hint" id="hint">Tap the green button to talk to Mira</div>
+  <a class="chat-link hidden" id="chatLink" href="https://web-production-45f0d.up.railway.app/">Continue to chat with Mira →</a>
 
   <audio id="botAudio" autoplay></audio>
 
@@ -111,7 +114,14 @@
         $("hint").textContent = "";
 
         // 1. Ask our server for a room + join token (this also launches Mira).
-        const res = await fetch("/connect", { method: "POST" });
+        //    Pass the Firebase uid from the URL so Mira loads this user's
+        //    onboarding profile and greets them by name.
+        const uid = new URLSearchParams(location.search).get("uid") || "";
+        const res = await fetch("/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ uid }),
+        });
         if (!res.ok) throw new Error("connect failed: " + res.status);
         const { url, token } = await res.json();
 
@@ -129,6 +139,7 @@
         // 3. Publish the mic (prompts for permission).
         await room.localParticipant.setMicrophoneEnabled(true);
 
+        $("chatLink").classList.add("hidden");
         showConnected();
       } catch (err) {
         setStatus("Could not connect");
@@ -150,7 +161,8 @@
       $("callBtn").disabled = false;
       $("timer").textContent = "";
       setStatus("Call ended");
-      $("hint").textContent = "Tap the green button to talk to Mira";
+      $("hint").textContent = "Tap the green button to talk to Mira again";
+      $("chatLink").classList.remove("hidden");
     }
 
     $("callBtn").addEventListener("click", startCall);

@@ -60,7 +60,7 @@ finally:
 # --------------------------------------------------------------------------- #
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
@@ -94,30 +94,45 @@ _PROFILE_FIELDS = ["name", "age", "gender", "height", "weight",
 
 
 def load_profile() -> dict:
-    """Load the manual-onboarding data for the user this call is for."""
+    """Fallback profile (local dev / no uid): read the sample profile.json."""
     try:
         return json.loads(Path(__file__).with_name("profile.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
 
 
-def build_system_prompt() -> str:
+def load_profile_for_call(firebase_uid: str | None) -> dict:
+    """Resolve the profile for THIS call.
+
+    If a Firebase uid was handed off from manual onboarding, read that user's
+    row from the shared Google Sheet so Mira greets them by name. Falls back to
+    the local sample profile if there's no uid or the lookup fails.
+    """
+    if firebase_uid:
+        try:
+            import profile_store  # local, imported lazily so the server boots even without sheets deps
+            profile = profile_store.load_profile_for_uid(firebase_uid)
+            if profile:
+                return profile
+        except Exception as exc:  # never let a sheet hiccup block the call
+            print(f"[profile] lookup failed for uid={firebase_uid!r}: {exc}")
+    return load_profile()
+
+
+def build_system_prompt(profile: dict | None = None) -> str:
     """Read call_prompt.md and fill its {{...}} variables from the profile."""
     template = Path(__file__).with_name("call_prompt.md").read_text(encoding="utf-8")
-    profile = load_profile()
+    profile = profile or {}
     for key in _PROFILE_FIELDS:
         value = str(profile.get(key, "")).strip() or "—"
         template = template.replace("{{" + key + "}}", value)
     return template
 
 
-SYSTEM_PROMPT = build_system_prompt()
-
-
 # --------------------------------------------------------------------------- #
 # The voice pipeline for a single call, joined to one LiveKit room.            #
 # --------------------------------------------------------------------------- #
-async def run_livekit_bot(room_name: str):
+async def run_livekit_bot(room_name: str, system_prompt: str):
     """Join `room_name` as Mira and run the onboarding conversation."""
     url = os.getenv("LIVEKIT_URL")
     key = os.getenv("LIVEKIT_API_KEY")
@@ -164,7 +179,7 @@ async def run_livekit_bot(room_name: str):
     # VAD controller — the VAD analyzer MUST be passed here (not to the transport).
     # When the VAD detects the user starting to speak while Mira is talking, the
     # turn controller fires an interruption that stops her TTS immediately.
-    context = LLMContext([{"role": "system", "content": SYSTEM_PROMPT}])
+    context = LLMContext([{"role": "system", "content": system_prompt}])
     aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
@@ -234,19 +249,33 @@ async def healthz():
 
 
 @app.post("/connect")
-async def connect():
-    """Create a room, launch Mira into it, and return the browser's join token."""
+async def connect(request: Request):
+    """Create a room, launch Mira into it, and return the browser's join token.
+
+    The body may include `{"uid": "<firebase_uid>"}` handed off from manual
+    onboarding — used to load that user's profile so Mira greets them by name.
+    """
     url = os.getenv("LIVEKIT_URL")
     key = os.getenv("LIVEKIT_API_KEY")
     secret = os.getenv("LIVEKIT_API_SECRET")
 
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    firebase_uid = (body or {}).get("uid") or None
+
+    # Build the prompt for THIS user (Sheet lookup by uid; falls back to sample).
+    profile = load_profile_for_call(firebase_uid)
+    system_prompt = build_system_prompt(profile)
+
     room_name = f"mira-{uuid.uuid4().hex[:10]}"
     user_token = generate_token(room_name, "user", key, secret)
 
-    # Launch Mira into the room; she waits for the user, then greets.
-    asyncio.create_task(run_livekit_bot(room_name))
+    # Launch Mira into the room; she waits for the user, then greets by name.
+    asyncio.create_task(run_livekit_bot(room_name, system_prompt))
 
-    return {"url": url, "token": user_token, "room": room_name}
+    return {"url": url, "token": user_token, "room": room_name, "name": profile.get("name", "")}
 
 
 def main():
