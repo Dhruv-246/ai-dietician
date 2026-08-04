@@ -8,6 +8,8 @@ gcp-*.json
 # Environment / secret config
 .env
 .env.*
+.env*
+"*.env*"
 !.env.example
 secrets/
 *.pem
