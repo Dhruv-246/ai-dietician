@@ -207,11 +207,15 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
         model=os.getenv("STT_MODEL", "saarika:v2.5"),
     )
 
-    # Groq's "versatile" 70B model for reasoning (fast, cheap, good enough here).
+    # Groq LLM for reasoning. Default to the 8B "instant" model: it's fast and
+    # has a much higher free-tier daily token limit than the 70B model (the 70B
+    # model's 100K tokens/day cap is easily exhausted because the full call
+    # prompt is re-sent every turn, which makes Mira go silent with a 429).
+    # Override with GROQ_MODEL if you upgrade to a paid Groq tier.
     llm = GroqLLMService(
         api_key=os.getenv("GROQ_API_KEY"),
         settings=GroqLLMService.Settings(
-            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
         ),
     )
 
