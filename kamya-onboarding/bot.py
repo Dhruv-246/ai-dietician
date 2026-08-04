@@ -43,7 +43,14 @@ _ORIG_CWD = os.getcwd()
 os.chdir(tempfile.gettempdir())
 try:
     from pipecat.audio.vad.silero import SileroVADAnalyzer
-    from pipecat.frames.frames import LLMRunFrame
+    from pipecat.frames.frames import (
+        BotStartedSpeakingFrame,
+        ErrorFrame,
+        LLMFullResponseStartFrame,
+        LLMRunFrame,
+        TTSStartedFrame,
+    )
+    from pipecat.observers.base_observer import BaseObserver, FramePushed
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.runner import PipelineRunner
     from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -145,6 +152,32 @@ def _log(msg: str) -> None:
     print("[mira]", line, flush=True)
 
 
+class _DiagObserver(BaseObserver):
+    """Non-intrusive observer that records the greeting pipeline's milestones —
+    LLM responding, TTS producing audio, bot speaking — and any ErrorFrame, so
+    /debug can show whether the LLM/TTS actually produced audio or errored."""
+
+    def __init__(self, room_name: str):
+        super().__init__()
+        self._room = room_name
+        self._seen: set = set()
+
+    async def on_push_frame(self, data: "FramePushed"):
+        frame = data.frame
+        if isinstance(frame, ErrorFrame):
+            _log(f"ERROR FRAME room={self._room}: {getattr(frame, 'error', frame)}")
+            return
+        for cls, label in (
+            (LLMFullResponseStartFrame, "llm responding"),
+            (TTSStartedFrame, "tts producing audio"),
+            (BotStartedSpeakingFrame, "bot speaking"),
+        ):
+            if isinstance(frame, cls) and label not in self._seen:
+                self._seen.add(label)
+                _log(f"{label} room={self._room}")
+                break
+
+
 # --------------------------------------------------------------------------- #
 # The voice pipeline for a single call, joined to one LiveKit room.            #
 # --------------------------------------------------------------------------- #
@@ -219,6 +252,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     task = PipelineTask(
         pipeline,
         params=PipelineParams(enable_metrics=True),
+        observers=[_DiagObserver(room_name)],
     )
 
     @transport.event_handler("on_first_participant_joined")
