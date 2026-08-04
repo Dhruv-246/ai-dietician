@@ -50,6 +50,8 @@
     .hidden { display: none !important; }
     .hint { font-size: 13px; color: #8aa596; margin-top: 10px; }
   </style>
+  <!-- LiveKit browser SDK (managed WebRTC — connects reliably from any host) -->
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
 </head>
 <body>
   <div class="status" id="status">Kamya Wellness</div>
@@ -78,7 +80,8 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
-    let pc = null, localStream = null, seconds = 0, timerInt = null;
+    const LK = window.LivekitClient;
+    let room = null, seconds = 0, timerInt = null;
 
     function setStatus(t) { $("status").innerHTML = t; }
     function startTimer() {
@@ -92,18 +95,12 @@
     }
     function stopTimer() { clearInterval(timerInt); }
 
-    function waitIceGathering(pc) {
-      return new Promise((resolve) => {
-        if (pc.iceGatheringState === "complete") return resolve();
-        const check = () => {
-          if (pc.iceGatheringState === "complete") {
-            pc.removeEventListener("icegatheringstatechange", check);
-            resolve();
-          }
-        };
-        pc.addEventListener("icegatheringstatechange", check);
-        setTimeout(resolve, 2500); // fallback: don't wait forever
-      });
+    function showConnected() {
+      setStatus('<span class="dot">●</span> Connected');
+      document.body.classList.remove("connecting");
+      $("callBtn").classList.add("hidden");
+      $("hangBtn").classList.remove("hidden");
+      startTimer();
     }
 
     async function startCall() {
@@ -113,48 +110,40 @@
         document.body.classList.add("connecting");
         $("hint").textContent = "";
 
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-        localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+        // 1. Ask our server for a room + join token (this also launches Mira).
+        const res = await fetch("/connect", { method: "POST" });
+        if (!res.ok) throw new Error("connect failed: " + res.status);
+        const { url, token } = await res.json();
 
-        pc.ontrack = (e) => { $("botAudio").srcObject = e.streams[0]; };
-        pc.onconnectionstatechange = () => {
-          if (pc.connectionState === "connected") {
-            setStatus('<span class="dot">●</span> Connected');
-            document.body.classList.remove("connecting");
-            $("callBtn").classList.add("hidden");
-            $("hangBtn").classList.remove("hidden");
-            startTimer();
-          } else if (["failed", "disconnected", "closed"].includes(pc.connectionState)) {
-            endCall();
-          }
-        };
+        // 2. Join the LiveKit room.
+        room = new LK.Room({ adaptiveStream: true, dynacast: true });
 
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await waitIceGathering(pc);
-
-        const res = await fetch("/api/offer", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+        // Play Mira's audio when her track arrives.
+        room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === "audio") track.attach($("botAudio"));
         });
-        if (!res.ok) throw new Error("offer failed: " + res.status);
-        const answer = await res.json();
-        await pc.setRemoteDescription(answer);
+        room.on(LK.RoomEvent.Disconnected, () => endCall());
+
+        await room.connect(url, token);
+
+        // 3. Publish the mic (prompts for permission).
+        await room.localParticipant.setMicrophoneEnabled(true);
+
+        showConnected();
       } catch (err) {
         setStatus("Could not connect");
         $("hint").textContent = String(err.message || err);
         document.body.classList.remove("connecting");
         $("callBtn").disabled = false;
+        try { if (room) await room.disconnect(); } catch (_) {}
+        room = null;
       }
     }
 
-    function endCall() {
+    async function endCall() {
       stopTimer();
-      try { if (pc) pc.close(); } catch (_) {}
-      try { if (localStream) localStream.getTracks().forEach((t) => t.stop()); } catch (_) {}
-      pc = null; localStream = null;
+      try { if (room) await room.disconnect(); } catch (_) {}
+      room = null;
       document.body.classList.remove("connecting");
       $("hangBtn").classList.add("hidden");
       $("callBtn").classList.remove("hidden");
