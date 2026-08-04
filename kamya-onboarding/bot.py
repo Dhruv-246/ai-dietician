@@ -47,6 +47,7 @@ try:
     from pipecat.processors.aggregators.llm_context import LLMContext
     from pipecat.processors.aggregators.llm_response_universal import (
         LLMContextAggregatorPair,
+        LLMUserAggregatorParams,
     )
     from pipecat.services.cartesia.tts import CartesiaTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
@@ -132,7 +133,6 @@ async def run_livekit_bot(room_name: str):
         params=LiveKitParams(
             audio_in_enabled=True,
             audio_out_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(),  # detects speech / silence for turns
         ),
     )
 
@@ -160,8 +160,15 @@ async def run_livekit_bot(room_name: str):
         ),
     )
 
+    # Barge-in (interruptions) in Pipecat 1.7.0 is driven by the user aggregator's
+    # VAD controller — the VAD analyzer MUST be passed here (not to the transport).
+    # When the VAD detects the user starting to speak while Mira is talking, the
+    # turn controller fires an interruption that stops her TTS immediately.
     context = LLMContext([{"role": "system", "content": SYSTEM_PROMPT}])
-    aggregator = LLMContextAggregatorPair(context)
+    aggregator = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+    )
 
     pipeline = Pipeline(
         [
@@ -175,12 +182,11 @@ async def run_livekit_bot(room_name: str):
         ]
     )
 
+    # Note: `allow_interruptions` no longer exists in Pipecat 1.7.0 — barge-in is
+    # configured on the user aggregator's VAD above, not here.
     task = PipelineTask(
         pipeline,
-        params=PipelineParams(
-            allow_interruptions=True,   # barge-in: user can cut the bot off
-            enable_metrics=True,
-        ),
+        params=PipelineParams(enable_metrics=True),
     )
 
     @transport.event_handler("on_first_participant_joined")
