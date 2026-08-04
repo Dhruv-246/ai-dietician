@@ -136,8 +136,14 @@
 
         await room.connect(url, token);
 
-        // 3. Publish the mic (prompts for permission).
-        await room.localParticipant.setMicrophoneEnabled(true);
+        // 3. Publish the mic (prompts for permission). If the mic is blocked or
+        //    missing, stay connected anyway so the user can still HEAR Mira
+        //    (they just won't be able to talk back until they enable it).
+        try {
+          await room.localParticipant.setMicrophoneEnabled(true);
+        } catch (micErr) {
+          $("hint").textContent = "Mic is off — enable it to talk back to Mira";
+        }
 
         $("chatLink").classList.add("hidden");
         showConnected();

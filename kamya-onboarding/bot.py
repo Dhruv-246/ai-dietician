@@ -25,7 +25,10 @@ import json
 import os
 import sys
 import tempfile
+import time
+import traceback
 import uuid
+from collections import deque
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -129,11 +132,25 @@ def build_system_prompt(profile: dict | None = None) -> str:
     return template
 
 
+# --- Lightweight diagnostics -------------------------------------------------
+# A small in-memory ring buffer of call lifecycle events, exposed at /debug so
+# call problems can be diagnosed over HTTP without shell access. Records NO user
+# data (no names, no uids) — only whether they were present.
+_EVENTS: deque = deque(maxlen=80)
+
+
+def _log(msg: str) -> None:
+    line = f"{time.strftime('%H:%M:%S')} {msg}"
+    _EVENTS.append(line)
+    print("[mira]", line, flush=True)
+
+
 # --------------------------------------------------------------------------- #
 # The voice pipeline for a single call, joined to one LiveKit room.            #
 # --------------------------------------------------------------------------- #
 async def run_livekit_bot(room_name: str, system_prompt: str):
     """Join `room_name` as Mira and run the onboarding conversation."""
+    _log(f"bot starting room={room_name} prompt_chars={len(system_prompt)}")
     url = os.getenv("LIVEKIT_URL")
     key = os.getenv("LIVEKIT_API_KEY")
     secret = os.getenv("LIVEKIT_API_SECRET")
@@ -207,16 +224,20 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     @transport.event_handler("on_first_participant_joined")
     async def on_first_participant_joined(transport, participant_id):
         # Make Mira speak first: run the LLM once so she greets and begins.
+        _log(f"participant joined room={room_name} -> queue greeting")
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_participant_disconnected")
     async def on_participant_disconnected(transport, participant_id):
         # User hung up (red button) → end the call and free resources.
+        _log(f"participant left room={room_name} -> cancel")
         await task.cancel()
 
     # handle_sigint=False: this runs as a background task inside the web
     # server's event loop, so it must NOT try to install process signal handlers.
+    _log(f"pipeline built room={room_name} -> running")
     await PipelineRunner(handle_sigint=False).run(task)
+    _log(f"pipeline finished room={room_name}")
 
 
 # --------------------------------------------------------------------------- #
@@ -279,14 +300,35 @@ async def connect(request: Request):
     # Build the prompt for THIS user (Sheet lookup by uid; falls back to sample).
     profile = load_profile_for_call(firebase_uid)
     system_prompt = build_system_prompt(profile)
+    _log(
+        f"connect uid_present={bool(firebase_uid)} "
+        f"name_present={bool(profile.get('name'))} "
+        f"profile_fields={sum(1 for f in _PROFILE_FIELDS if profile.get(f))}/{len(_PROFILE_FIELDS)}"
+    )
 
     room_name = f"mira-{uuid.uuid4().hex[:10]}"
     user_token = generate_token(room_name, "user", key, secret)
 
     # Launch Mira into the room; she waits for the user, then greets by name.
-    asyncio.create_task(run_livekit_bot(room_name, system_prompt))
+    asyncio.create_task(_run_bot_safe(room_name, system_prompt))
 
     return {"url": url, "token": user_token, "room": room_name, "name": profile.get("name", "")}
+
+
+async def _run_bot_safe(room_name: str, system_prompt: str):
+    """Run the bot as a background task, logging any crash (which is otherwise
+    swallowed by the event loop) so /debug can surface why Mira didn't speak."""
+    try:
+        await run_livekit_bot(room_name, system_prompt)
+    except Exception as exc:
+        _log(f"BOT ERROR room={room_name}: {type(exc).__name__}: {exc}")
+        print("[mira] traceback:\n" + traceback.format_exc(), flush=True)
+
+
+@app.get("/debug")
+async def debug():
+    """Recent call lifecycle events (no user data) for diagnosing call issues."""
+    return {"events": list(_EVENTS)}
 
 
 def main():
