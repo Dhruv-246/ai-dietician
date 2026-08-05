@@ -251,12 +251,14 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     )
 
     # Cerebras LLM for reasoning — the fastest inference available (very low
-    # time-to-first-token, which matters most for a snappy voice call), running
-    # the 70B model for good quality. Override the model with CEREBRAS_MODEL.
+    # time-to-first-token, which matters most for a snappy voice call). Default
+    # to llama3.1-8b: guaranteed on the free tier and the fastest option. (Note
+    # Cerebras's exact model id spelling.) Override with CEREBRAS_MODEL to use
+    # a larger model like "llama-3.3-70b" or "gpt-oss-120b" if your key allows.
     llm = CerebrasLLMService(
         api_key=os.getenv("CEREBRAS_API_KEY"),
         settings=CerebrasLLMService.Settings(
-            model=os.getenv("CEREBRAS_MODEL", "llama-3.3-70b"),
+            model=os.getenv("CEREBRAS_MODEL", "llama3.1-8b"),
         ),
     )
 
@@ -309,13 +311,6 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     async def on_first_participant_joined(transport, participant_id):
         # Make Mira speak first: run the LLM once so she greets and begins.
         _log(f"participant joined room={room_name} -> queue greeting")
-        # Diagnostic: prove the data channel reaches the client (isolates the
-        # caption data path from the transcript-capture path).
-        try:
-            await transport.send_message(json.dumps({"role": "assistant", "text": "…"}))
-            _log("test caption sent on join")
-        except Exception as exc:
-            _log(f"test caption failed: {exc}")
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_participant_disconnected")
