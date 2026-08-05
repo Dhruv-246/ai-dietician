@@ -255,11 +255,11 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     # to llama3.1-8b: guaranteed on the free tier and the fastest option. (Note
     # Cerebras's exact model id spelling.) Override with CEREBRAS_MODEL to use
     # a larger model like "llama-3.3-70b" or "gpt-oss-120b" if your key allows.
+    cerebras_model = os.getenv("CEREBRAS_MODEL", "llama3.1-8b")
+    _log(f"llm cerebras model={cerebras_model}")
     llm = CerebrasLLMService(
         api_key=os.getenv("CEREBRAS_API_KEY"),
-        settings=CerebrasLLMService.Settings(
-            model=os.getenv("CEREBRAS_MODEL", "llama3.1-8b"),
-        ),
+        settings=CerebrasLLMService.Settings(model=cerebras_model),
     )
 
     # TTS: multilingual + Hindi so Devanagari in replies is pronounced right.
@@ -369,6 +369,23 @@ async def healthz():
 @app.get("/debug")
 async def debug():
     return {"events": list(_EVENTS)}
+
+
+@app.get("/models")
+async def models():
+    """Temporary diagnostic: list the Cerebras models this key can access."""
+    import urllib.request
+    key = os.getenv("CEREBRAS_API_KEY") or ""
+    req = urllib.request.Request(
+        "https://api.cerebras.ai/v1/models",
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        return {"models": [m.get("id") for m in data.get("data", [])]}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.post("/connect")
