@@ -199,6 +199,7 @@ class _CaptionObserver(BaseObserver):
             return
         try:
             await self._transport.send_message(json.dumps({"role": role, "text": text}))
+            _log(f"caption sent role={role} len={len(text)}")
         except Exception as exc:
             _log(f"caption send failed: {exc}")
 
@@ -308,6 +309,13 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     async def on_first_participant_joined(transport, participant_id):
         # Make Mira speak first: run the LLM once so she greets and begins.
         _log(f"participant joined room={room_name} -> queue greeting")
+        # Diagnostic: prove the data channel reaches the client (isolates the
+        # caption data path from the transcript-capture path).
+        try:
+            await transport.send_message(json.dumps({"role": "assistant", "text": "…"}))
+            _log("test caption sent on join")
+        except Exception as exc:
+            _log(f"test caption failed: {exc}")
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_participant_disconnected")
@@ -361,6 +369,11 @@ async def avatar():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+@app.get("/debug")
+async def debug():
+    return {"events": list(_EVENTS)}
 
 
 @app.post("/connect")
