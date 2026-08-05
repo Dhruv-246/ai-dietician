@@ -61,7 +61,7 @@ try:
     )
     from pipecat.services.cartesia.tts import CartesiaTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
-    from pipecat.services.groq.llm import GroqLLMService
+    from pipecat.services.cerebras.llm import CerebrasLLMService
     from pipecat.transcriptions.language import Language
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.runner.livekit import generate_token, generate_token_with_agent
@@ -81,7 +81,7 @@ if _ENV_PATH.exists():
 
 # Fail early with a clear message if any required key is missing/blank.
 _REQUIRED = [
-    "GROQ_API_KEY", "SARVAM_API_KEY", "CARTESIA_API_KEY",
+    "CEREBRAS_API_KEY", "SARVAM_API_KEY", "CARTESIA_API_KEY",
     "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
 ]
 _missing = [k for k in _REQUIRED if not os.getenv(k)]
@@ -207,15 +207,13 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
         model=os.getenv("STT_MODEL", "saarika:v2.5"),
     )
 
-    # Groq LLM for reasoning. Default to the 8B "instant" model: it's fast and
-    # has a much higher free-tier daily token limit than the 70B model (the 70B
-    # model's 100K tokens/day cap is easily exhausted because the full call
-    # prompt is re-sent every turn, which makes Mira go silent with a 429).
-    # Override with GROQ_MODEL if you upgrade to a paid Groq tier.
-    llm = GroqLLMService(
-        api_key=os.getenv("GROQ_API_KEY"),
-        settings=GroqLLMService.Settings(
-            model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+    # Cerebras LLM for reasoning — the fastest inference available (very low
+    # time-to-first-token, which matters most for a snappy voice call), running
+    # the 70B model for good quality. Override the model with CEREBRAS_MODEL.
+    llm = CerebrasLLMService(
+        api_key=os.getenv("CEREBRAS_API_KEY"),
+        settings=CerebrasLLMService.Settings(
+            model=os.getenv("CEREBRAS_MODEL", "llama-3.3-70b"),
         ),
     )
 
