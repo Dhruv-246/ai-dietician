@@ -364,11 +364,6 @@ async def healthz():
     return {"ok": True}
 
 
-@app.get("/debug")
-async def debug():
-    return {"events": list(_EVENTS)}
-
-
 @app.post("/connect")
 async def connect(request: Request):
     """Create a room, launch Mira into it, and return the browser's join token.
