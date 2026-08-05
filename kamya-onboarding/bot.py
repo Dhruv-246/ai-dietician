@@ -43,11 +43,15 @@ _ORIG_CWD = os.getcwd()
 os.chdir(tempfile.gettempdir())
 try:
     from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.audio.vad.vad_analyzer import VADParams
     from pipecat.frames.frames import (
         BotStartedSpeakingFrame,
         ErrorFrame,
+        LLMFullResponseEndFrame,
         LLMFullResponseStartFrame,
         LLMRunFrame,
+        LLMTextFrame,
+        TranscriptionFrame,
         TTSStartedFrame,
     )
     from pipecat.observers.base_observer import BaseObserver, FramePushed
@@ -178,6 +182,44 @@ class _DiagObserver(BaseObserver):
                 break
 
 
+class _CaptionObserver(BaseObserver):
+    """Streams live captions to the browser: the user's final transcript and
+    Mira's spoken text, sent as JSON data messages over LiveKit so the call
+    screen can show both sides of the conversation as text."""
+
+    def __init__(self, transport):
+        super().__init__()
+        self._transport = transport
+        self._seen_ids: set = set()     # dedupe: observer sees each frame once per hop
+        self._bot_text: list = []       # accumulate Mira's streamed tokens
+
+    async def _send(self, role: str, text: str):
+        text = (text or "").strip()
+        if not text:
+            return
+        try:
+            await self._transport.send_message(json.dumps({"role": role, "text": text}))
+        except Exception as exc:
+            _log(f"caption send failed: {exc}")
+
+    async def on_push_frame(self, data: "FramePushed"):
+        frame = data.frame
+        fid = getattr(frame, "id", None)
+        if fid is not None:
+            if fid in self._seen_ids:
+                return
+            self._seen_ids.add(fid)
+
+        if isinstance(frame, TranscriptionFrame):        # user's final speech-to-text
+            await self._send("user", frame.text)
+        elif isinstance(frame, LLMTextFrame):            # Mira's streamed tokens
+            self._bot_text.append(frame.text or "")
+        elif isinstance(frame, LLMFullResponseEndFrame):  # Mira finished a reply
+            full = "".join(self._bot_text)
+            self._bot_text = []
+            await self._send("assistant", full)
+
+
 # --------------------------------------------------------------------------- #
 # The voice pipeline for a single call, joined to one LiveKit room.            #
 # --------------------------------------------------------------------------- #
@@ -231,10 +273,15 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     # VAD controller — the VAD analyzer MUST be passed here (not to the transport).
     # When the VAD detects the user starting to speak while Mira is talking, the
     # turn controller fires an interruption that stops her TTS immediately.
+    # stop_secs = how long of silence before Mira takes her turn. The default
+    # (~0.8s) makes replies feel late; 0.45s is snappier while still letting the
+    # user finish a sentence (the smart-turn analyzer guards against cut-offs).
     context = LLMContext([{"role": "system", "content": system_prompt}])
     aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.45)),
+        ),
     )
 
     pipeline = Pipeline(
@@ -254,7 +301,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     task = PipelineTask(
         pipeline,
         params=PipelineParams(enable_metrics=True),
-        observers=[_DiagObserver(room_name)],
+        observers=[_DiagObserver(room_name), _CaptionObserver(transport)],
     )
 
     @transport.event_handler("on_first_participant_joined")

@@ -51,6 +51,14 @@
     .hint { font-size: 13px; color: #8aa596; margin-top: 10px; }
     .chat-link { margin-top: 14px; font-size: 15px; font-weight: 700; color: #23a95a; text-decoration: none; }
     .chat-link:hover { text-decoration: underline; }
+    .transcript {
+      width: min(620px, 92%); max-height: 32vh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px; margin: 6px 0 2px;
+    }
+    .msg { max-width: 82%; padding: 9px 13px; border-radius: 16px; font-size: 15px; line-height: 1.35; text-align: left; }
+    .msg .who { display: block; font-size: 11px; font-weight: 700; color: #6b8577; margin-bottom: 2px; }
+    .msg.user { align-self: flex-end; background: #cdeed9; border-bottom-right-radius: 5px; }
+    .msg.mira { align-self: flex-start; background: #fff; border: 1px solid #e2efe7; border-bottom-left-radius: 5px; }
   </style>
   <!-- LiveKit browser SDK (managed WebRTC — connects reliably from any host) -->
   <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
@@ -65,6 +73,8 @@
     <div class="name">Mira</div>
     <div class="timer" id="timer"></div>
   </div>
+
+  <div class="transcript hidden" id="transcript"></div>
 
   <div class="controls">
     <!-- Green: start the call -->
@@ -98,6 +108,20 @@
     }
     function stopTimer() { clearInterval(timerInt); }
 
+    function addCaption(role, text) {
+      const box = $("transcript");
+      box.classList.remove("hidden");
+      const line = document.createElement("div");
+      line.className = "msg " + (role === "user" ? "user" : "mira");
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = role === "user" ? "You" : "Mira";
+      line.appendChild(who);
+      line.appendChild(document.createTextNode(text));
+      box.appendChild(line);
+      box.scrollTop = box.scrollHeight;
+    }
+
     function showConnected() {
       setStatus('<span class="dot">●</span> Connected');
       document.body.classList.remove("connecting");
@@ -112,6 +136,8 @@
         setStatus('<span class="dot">●</span> Connecting…');
         document.body.classList.add("connecting");
         $("hint").textContent = "";
+        $("transcript").innerHTML = "";
+        $("transcript").classList.add("hidden");
 
         // 1. Ask our server for a room + join token (this also launches Mira).
         //    Pass the Firebase uid from the URL so Mira loads this user's
@@ -131,6 +157,13 @@
         // Play Mira's audio when her track arrives.
         room.on(LK.RoomEvent.TrackSubscribed, (track) => {
           if (track.kind === "audio") track.attach($("botAudio"));
+        });
+        // Live captions: the bot sends {role, text} JSON as data messages.
+        room.on(LK.RoomEvent.DataReceived, (payload) => {
+          try {
+            const msg = JSON.parse(new TextDecoder().decode(payload));
+            if (msg && msg.text) addCaption(msg.role, msg.text);
+          } catch (_) {}
         });
         room.on(LK.RoomEvent.Disconnected, () => endCall());
 
