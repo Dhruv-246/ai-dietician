@@ -65,7 +65,7 @@ try:
     )
     from pipecat.services.cartesia.tts import CartesiaTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
-    from pipecat.services.cerebras.llm import CerebrasLLMService
+    from pipecat.services.groq.llm import GroqLLMService
     from pipecat.transcriptions.language import Language
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.runner.livekit import generate_token, generate_token_with_agent
@@ -85,7 +85,7 @@ if _ENV_PATH.exists():
 
 # Fail early with a clear message if any required key is missing/blank.
 _REQUIRED = [
-    "CEREBRAS_API_KEY", "SARVAM_API_KEY", "CARTESIA_API_KEY",
+    "GROQ_API_KEY", "SARVAM_API_KEY", "CARTESIA_API_KEY",
     "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
 ]
 _missing = [k for k in _REQUIRED if not os.getenv(k)]
@@ -250,16 +250,14 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
         model=os.getenv("STT_MODEL", "saarika:v2.5"),
     )
 
-    # Cerebras LLM for reasoning — the fastest inference available (very low
-    # time-to-first-token, which matters most for a snappy voice call). Default
-    # to llama3.1-8b: guaranteed on the free tier and the fastest option. (Note
-    # Cerebras's exact model id spelling.) Override with CEREBRAS_MODEL to use
-    # a larger model like "llama-3.3-70b" or "gpt-oss-120b" if your key allows.
-    cerebras_model = os.getenv("CEREBRAS_MODEL", "llama3.1-8b")
-    _log(f"llm cerebras model={cerebras_model}")
-    llm = CerebrasLLMService(
-        api_key=os.getenv("CEREBRAS_API_KEY"),
-        settings=CerebrasLLMService.Settings(model=cerebras_model),
+    # Groq LLM for reasoning — very fast (LPU) time-to-first-token. Default to
+    # llama-3.1-8b-instant. The free tier has a daily token cap; if it's hit,
+    # swap GROQ_API_KEY for a fresh key. Override the model with GROQ_MODEL.
+    groq_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    _log(f"llm groq model={groq_model}")
+    llm = GroqLLMService(
+        api_key=os.getenv("GROQ_API_KEY"),
+        settings=GroqLLMService.Settings(model=groq_model),
     )
 
     # TTS: multilingual + Hindi so Devanagari in replies is pronounced right.
@@ -369,23 +367,6 @@ async def healthz():
 @app.get("/debug")
 async def debug():
     return {"events": list(_EVENTS)}
-
-
-@app.get("/models")
-async def models():
-    """Temporary diagnostic: list the Cerebras models this key can access."""
-    import urllib.request
-    key = os.getenv("CEREBRAS_API_KEY") or ""
-    req = urllib.request.Request(
-        "https://api.cerebras.ai/v1/models",
-        headers={"Authorization": f"Bearer {key}"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.loads(r.read())
-        return {"models": [m.get("id") for m in data.get("data", [])]}
-    except Exception as exc:
-        return {"error": str(exc)}
 
 
 @app.post("/connect")

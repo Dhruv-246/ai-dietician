@@ -1,8 +1,6 @@
 # Kamya Wellness onboarding voice agent (Pipecat + LiveKit). Python 3.10+ (tested on 3.11).
 # Pinned to the version the bot was written/validated against.
-pipecat-ai[sarvam,cartesia,silero,livekit]==1.7.0
-# Cerebras LLM (fastest inference) via pipecat's OpenAI-compatible client.
-openai
+pipecat-ai[sarvam,groq,cartesia,silero,livekit]==1.7.0
 
 # LiveKit browser-token minting + rtc client used by the transport.
 livekit
