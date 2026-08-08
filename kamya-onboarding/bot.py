@@ -527,7 +527,7 @@ async def el_tts_test(request: Request):
     import urllib.error
     import urllib.request
     key = os.getenv("ELEVENLABS_API_KEY") or ""
-    voice = os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+    voice = request.query_params.get("voice") or os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
     model = request.query_params.get("model") or os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")
     lang = request.query_params.get("lang")  # omit = no language_code
     body = {"text": "नमस्ते, यह एक छोटा test है। routine ठीक है।", "model_id": model}
@@ -541,13 +541,13 @@ async def el_tts_test(request: Request):
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             raw = r.read()
-            return {"model": model, "lang": lang, "status": r.status,
+            return {"voice": voice, "model": model, "lang": lang, "status": r.status,
                     "content_type": r.headers.get("Content-Type"), "audio_bytes": len(raw)}
     except urllib.error.HTTPError as e:
-        return {"model": model, "lang": lang, "status": e.code,
+        return {"voice": voice, "model": model, "lang": lang, "status": e.code,
                 "error": e.read().decode("utf-8", "replace")[:500]}
     except Exception as e:
-        return {"model": model, "lang": lang, "error": str(e)[:300]}
+        return {"voice": voice, "model": model, "lang": lang, "error": str(e)[:300]}
 
 
 @app.post("/connect")
