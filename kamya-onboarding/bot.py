@@ -73,9 +73,14 @@ finally:
     os.chdir(_ORIG_CWD)
 # --------------------------------------------------------------------------- #
 
+from datetime import datetime, timezone
+
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+
+import consolidate
+import memory_store
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
 # is no .env — the platform injects the variables into the environment directly.
@@ -133,10 +138,65 @@ def load_profile_for_call(firebase_uid: str | None) -> dict:
     return load_profile()
 
 
-def build_system_prompt(profile: dict | None = None) -> str:
-    """Read call_prompt.md and fill its {{...}} variables from the profile."""
-    template = Path(__file__).with_name("call_prompt.md").read_text(encoding="utf-8")
+def _build_user_context(profile: dict, memory: dict) -> str:
+    """Assemble the 'what you already know' block for the ongoing (Step-3) prompt
+    from the user's profile + cumulative long-term memory + continuity signals."""
     profile = profile or {}
+    memory = memory or {}
+    ltm = memory.get("long_term_memory") or {}
+    lines = []
+
+    prof_bits = [f"{k.capitalize()}: {profile[k]}" for k in _PROFILE_FIELDS
+                 if str(profile.get(k, "")).strip()]
+    if prof_bits:
+        lines.append("Profile — " + " | ".join(prof_bits))
+
+    for label, key in (("Goals", "goals"), ("Preferences", "preferences"),
+                       ("Dislikes", "dislikes"), ("Known facts", "facts")):
+        vals = ltm.get(key) or []
+        if vals:
+            lines.append(f"{label}: " + "; ".join(str(v) for v in vals))
+
+    open_loops = memory.get("open_loops") or []
+    if open_loops:
+        lines.append("Open loops (gently follow up on ONE if it fits — do not interrogate): "
+                     + "; ".join(str(v) for v in open_loops))
+
+    # Continuity signals
+    count = int(memory.get("session_count") or 0)
+    if count > 0:
+        cont = f"This is check-in #{count + 1}."
+        last_at = str(memory.get("last_session_at") or "").strip()
+        if last_at:
+            try:
+                delta = datetime.now(timezone.utc) - datetime.fromisoformat(last_at)
+                days = max(0, delta.days)
+                cont += f" Last call was {'today' if days == 0 else f'{days} day(s) ago'}."
+            except Exception:
+                pass
+        last_sum = str(memory.get("last_session_summary") or "").strip()
+        if last_sum:
+            cont += f' Last time: "{last_sum}"'
+        lines.append(cont)
+
+    return "\n".join(f"- {ln}" for ln in lines) if lines else "- (No prior context yet — this is your first talk with them.)"
+
+
+def build_system_prompt(mode: str, profile: dict | None = None, memory: dict | None = None) -> str:
+    """Build the system prompt for the call.
+
+    mode="onboarding" → Mira LEADS the scripted onboarding interview (call_prompt.md).
+    mode="ongoing"    → Mira answers the user's questions (ask_prompt.md), primed
+                        with the user's profile + cumulative long-term memory.
+    """
+    profile = profile or {}
+    if mode == "ongoing":
+        template = Path(__file__).with_name("ask_prompt.md").read_text(encoding="utf-8")
+        template = template.replace("{{name}}", str(profile.get("name", "")).strip() or "there")
+        return template.replace("{{user_context}}", _build_user_context(profile, memory))
+
+    # onboarding (Step 2) — unchanged behaviour.
+    template = Path(__file__).with_name("call_prompt.md").read_text(encoding="utf-8")
     for key in _PROFILE_FIELDS:
         value = str(profile.get(key, "")).strip() or "—"
         template = template.replace("{{" + key + "}}", value)
@@ -224,9 +284,11 @@ class _CaptionObserver(BaseObserver):
 # --------------------------------------------------------------------------- #
 # The voice pipeline for a single call, joined to one LiveKit room.            #
 # --------------------------------------------------------------------------- #
-async def run_livekit_bot(room_name: str, system_prompt: str):
-    """Join `room_name` as Mira and run the onboarding conversation."""
-    _log(f"bot starting room={room_name} prompt_chars={len(system_prompt)}")
+async def run_livekit_bot(room_name: str, system_prompt: str, *,
+                          firebase_uid=None, user_id="", run_id="",
+                          mode="onboarding", existing_memory=None):
+    """Join `room_name` as Mira, run the conversation, then consolidate memory."""
+    _log(f"bot starting room={room_name} mode={mode} prompt_chars={len(system_prompt)}")
     url = os.getenv("LIVEKIT_URL")
     key = os.getenv("LIVEKIT_API_KEY")
     secret = os.getenv("LIVEKIT_API_SECRET")
@@ -320,8 +382,52 @@ async def run_livekit_bot(room_name: str, system_prompt: str):
     # handle_sigint=False: this runs as a background task inside the web
     # server's event loop, so it must NOT try to install process signal handlers.
     _log(f"pipeline built room={room_name} -> running")
+    started_at = datetime.now(timezone.utc).isoformat()
     await PipelineRunner(handle_sigint=False).run(task)
     _log(f"pipeline finished room={room_name}")
+
+    # --- End-of-session memory consolidation (off the audio path) ------------
+    # The call has ended. Read the transcript from the context, extract durable
+    # memory + summary + open loops (one LLM call), and MERGE into the user's
+    # cumulative long-term memory. Runs for both modes (onboarding seeds v1).
+    if firebase_uid:
+        try:
+            transcript = _transcript_from_context(context)
+            user_turns = sum(1 for m in context.get_messages() if m.get("role") == "user")
+            if user_turns >= 1:
+                _log(f"consolidating room={room_name} turns={user_turns}")
+                result = consolidate.consolidate(existing_memory or {}, transcript)
+                memory_store.save_consolidation(
+                    firebase_uid=firebase_uid, user_id=user_id, run_id=run_id,
+                    session_type=mode, started_at=started_at,
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    merged_memory=result["long_term_memory"],
+                    session_summary=result["session_summary"],
+                    open_loops=result["open_loops"],
+                )
+                _log(f"memory saved room={room_name} open_loops={len(result['open_loops'])}")
+            else:
+                _log(f"no user turns room={room_name} -> skip consolidation")
+        except Exception as exc:
+            _log(f"consolidation failed room={room_name}: {exc}")
+
+
+def _transcript_from_context(context) -> str:
+    """Flatten the LLM context's user/assistant turns into a plain transcript."""
+    lines = []
+    for msg in context.get_messages():
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            content = " ".join(
+                part.get("text", "") for part in content if isinstance(part, dict)
+            )
+        text = (content or "").strip()
+        if text:
+            lines.append(f"{'User' if role == 'user' else 'Mira'}: {text}")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -380,30 +486,42 @@ async def connect(request: Request):
     except Exception:
         body = {}
     firebase_uid = (body or {}).get("uid") or None
+    mode = str((body or {}).get("mode") or "onboarding").strip().lower()
+    if mode not in ("onboarding", "ongoing"):
+        mode = "onboarding"
 
-    # Build the prompt for THIS user (Sheet lookup by uid; falls back to sample).
+    # Profile (manual-onboarding data) + cumulative long-term memory for this user.
     profile = load_profile_for_call(firebase_uid)
-    system_prompt = build_system_prompt(profile)
+    memory = memory_store.load_memory(firebase_uid) if firebase_uid else {}
+    user_id = memory.get("user_id", "") if memory else ""
+
+    system_prompt = build_system_prompt(mode, profile, memory)
+    run_id = f"run-{uuid.uuid4().hex[:8]}"
     _log(
-        f"connect uid_present={bool(firebase_uid)} "
+        f"connect mode={mode} uid_present={bool(firebase_uid)} "
         f"name_present={bool(profile.get('name'))} "
-        f"profile_fields={sum(1 for f in _PROFILE_FIELDS if profile.get(f))}/{len(_PROFILE_FIELDS)}"
+        f"has_memory={bool((memory or {}).get('long_term_memory'))} run_id={run_id}"
     )
 
     room_name = f"mira-{uuid.uuid4().hex[:10]}"
     user_token = generate_token(room_name, "user", key, secret)
 
-    # Launch Mira into the room; she waits for the user, then greets by name.
-    asyncio.create_task(_run_bot_safe(room_name, system_prompt))
+    # Launch Mira into the room; she waits for the user, then greets.
+    asyncio.create_task(_run_bot_safe(
+        room_name, system_prompt,
+        firebase_uid=firebase_uid, user_id=user_id, run_id=run_id,
+        mode=mode, existing_memory=(memory or {}).get("long_term_memory", {}),
+    ))
 
-    return {"url": url, "token": user_token, "room": room_name, "name": profile.get("name", "")}
+    return {"url": url, "token": user_token, "room": room_name,
+            "name": profile.get("name", ""), "mode": mode}
 
 
-async def _run_bot_safe(room_name: str, system_prompt: str):
+async def _run_bot_safe(room_name: str, system_prompt: str, **kwargs):
     """Run the bot as a background task, logging any crash (which is otherwise
-    swallowed by the event loop) so /debug can surface why Mira didn't speak."""
+    swallowed by the event loop) so failures are visible in the server logs."""
     try:
-        await run_livekit_bot(room_name, system_prompt)
+        await run_livekit_bot(room_name, system_prompt, **kwargs)
     except Exception as exc:
         _log(f"BOT ERROR room={room_name}: {type(exc).__name__}: {exc}")
         print("[mira] traceback:\n" + traceback.format_exc(), flush=True)

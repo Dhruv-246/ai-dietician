@@ -40,13 +40,19 @@ def _load_credentials() -> Credentials:
 
 
 @lru_cache(maxsize=1)
-def _worksheet():
-    """Authorize once and return the Users worksheet handle (cached)."""
+def get_spreadsheet():
+    """Authorize once and return the workbook handle (cached, shared)."""
     client = gspread.authorize(_load_credentials())
     spreadsheet_id = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
     if not spreadsheet_id:
         raise RuntimeError("GOOGLE_SHEETS_SPREADSHEET_ID is not set")
-    return client.open_by_key(spreadsheet_id).worksheet(TAB_USERS)
+    return client.open_by_key(spreadsheet_id)
+
+
+@lru_cache(maxsize=1)
+def _worksheet():
+    """Return the Users worksheet handle (cached)."""
+    return get_spreadsheet().worksheet(TAB_USERS)
 
 
 def _clean(value) -> str:

@@ -142,11 +142,13 @@
         // 1. Ask our server for a room + join token (this also launches Mira).
         //    Pass the Firebase uid from the URL so Mira loads this user's
         //    onboarding profile and greets them by name.
-        const uid = new URLSearchParams(location.search).get("uid") || "";
+        const params = new URLSearchParams(location.search);
+        const uid = params.get("uid") || "";
+        const mode = params.get("mode") || "";   // "ongoing" = Step-3 ask-Mira call
         const res = await fetch("/connect", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ uid }),
+          body: JSON.stringify({ uid, mode }),
         });
         if (!res.ok) throw new Error("connect failed: " + res.status);
         const { url, token } = await res.json();
