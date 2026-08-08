@@ -86,6 +86,9 @@ def ensure_user(firebase_uid: str, email: str | None = None) -> dict:
                 "user_id": str(row.get("user_id", "")).strip(),
                 "firebase_uid": firebase_uid,
                 "onboarding_completed": str(row.get("onboarding_completed", "")).strip(),
+                # Set by the voice agent when the onboarding call (Step 2) finishes.
+                # Absent column / new user -> empty -> treated as not done.
+                "onboarding_call_done": str(row.get("onboarding_call_done", "")).strip(),
                 "created": False,
             }
 
@@ -106,6 +109,7 @@ def ensure_user(firebase_uid: str, email: str | None = None) -> dict:
         "user_id": new_id,
         "firebase_uid": firebase_uid,
         "onboarding_completed": "FALSE",
+        "onboarding_call_done": "FALSE",
         "created": True,
     }
 

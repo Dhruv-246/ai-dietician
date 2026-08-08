@@ -8,6 +8,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 import { friendlyAuthError } from "./authErrors.js";
 import { syncUser } from "./userSync.js";
+import { landingTarget } from "./route.js";
 
 const form = document.getElementById("login-form");
 const emailEl = document.getElementById("email");
@@ -28,10 +29,16 @@ try {
   submitBtn.disabled = true;
 }
 
-// Already logged in? Go to the chat page.
+// Already logged in? Route to the right step (onboarding / onboarding call / Step-3 call).
 if (auth) {
-  onAuthStateChanged(auth, (user) => {
-    if (user) window.location.replace("/");
+  onAuthStateChanged(auth, async (user) => {
+    if (!user) return;
+    try {
+      const info = await syncUser(user);
+      window.location.replace(landingTarget(info, user.uid));
+    } catch (_) {
+      window.location.replace("/onboarding");
+    }
   });
 }
 
@@ -47,9 +54,7 @@ form.addEventListener("submit", async (e) => {
     );
     // Ensure the Users-sheet row exists (idempotent) and route by onboarding status.
     const info = await syncUser(cred.user);
-    const done =
-      info && String(info.onboarding_completed).toUpperCase() === "TRUE";
-    window.location.replace(done ? "/" : "/onboarding");
+    window.location.replace(landingTarget(info, cred.user.uid));
   } catch (err) {
     showError(friendlyAuthError(err));
     submitBtn.disabled = false;
