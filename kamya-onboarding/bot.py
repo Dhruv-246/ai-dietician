@@ -487,6 +487,39 @@ async def debug():
     return {"events": list(_EVENTS)}
 
 
+@app.get("/el-check")
+async def el_check():
+    """Temporary diagnostic: check ElevenLabs key, quota, and voice validity."""
+    import urllib.request
+    key = os.getenv("ELEVENLABS_API_KEY") or ""
+    voice = os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+    out = {"voice_id_configured": voice, "model": os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5")}
+
+    def _get(path):
+        req = urllib.request.Request("https://api.elevenlabs.io/v1" + path,
+                                     headers={"xi-api-key": key})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read())
+
+    try:
+        sub = _get("/user/subscription")
+        used = sub.get("character_count", 0)
+        limit = sub.get("character_limit", 0)
+        out.update({"tier": sub.get("tier"), "chars_used": used,
+                    "chars_limit": limit, "chars_remaining": limit - used})
+    except Exception as exc:
+        out["subscription_error"] = str(exc)[:200]
+
+    try:
+        _get("/voices/" + voice)
+        out["voice_valid"] = True
+    except Exception as exc:
+        out["voice_valid"] = False
+        out["voice_error"] = str(exc)[:200]
+
+    return out
+
+
 @app.post("/connect")
 async def connect(request: Request):
     """Create a room, launch Mira into it, and return the browser's join token.
