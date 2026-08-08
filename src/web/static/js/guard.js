@@ -10,6 +10,7 @@ import {
   signOut,
 } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
 import { syncUser } from "./userSync.js";
+import { landingTarget } from "./route.js";
 
 function redirectToLogin() {
   window.location.replace("/login");
@@ -29,20 +30,14 @@ if (auth) {
       redirectToLogin();
       return;
     }
-    // Ensure a Users-sheet row exists and learn onboarding status.
-    const info = await syncUser(user);
-    const done =
-      info && String(info.onboarding_completed).toUpperCase() === "TRUE";
-    if (!done) {
-      window.location.replace("/onboarding");
-      return;
-    }
-    // Expose a token getter so app.js can authenticate its /api/chat calls.
-    window.__miraGetToken = () => user.getIdToken();
-    // Authenticated + onboarded: reveal the chat UI.
-    document.body.classList.add("authed");
-    // Token is ready -> load "Welcome <name>" + the last 10 messages.
-    if (window.__miraInit) window.__miraInit();
+    // Step 3 is voice-only: "/" is a pure router, never the chat screen.
+    // Send the user to their current step — onboarding form, onboarding call,
+    // or the ongoing "talk to Mira" call — based on their progress.
+    let info = null;
+    try {
+      info = await syncUser(user);
+    } catch (_) {}
+    window.location.replace(landingTarget(info, user.uid));
   });
 
   const logoutBtn = document.getElementById("logout-btn");

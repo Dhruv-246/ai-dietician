@@ -87,14 +87,16 @@
     </button>
   </div>
   <div class="hint" id="hint">Tap the green button to talk to Mira</div>
-  <a class="chat-link hidden" id="chatLink" href="https://web-production-45f0d.up.railway.app/">Continue to chat with Mira →</a>
 
   <audio id="botAudio" autoplay></audio>
 
   <script>
     const $ = (id) => document.getElementById(id);
     const LK = window.LivekitClient;
-    let room = null, seconds = 0, timerInt = null;
+    let room = null, seconds = 0, timerInt = null, didConnect = false;
+    const params = new URLSearchParams(location.search);
+    const uid = params.get("uid") || "";
+    const mode = params.get("mode") || "";   // "ongoing" = Step-3 ask-Mira call; else onboarding call
 
     function setStatus(t) { $("status").innerHTML = t; }
     function startTimer() {
@@ -123,6 +125,7 @@
     }
 
     function showConnected() {
+      didConnect = true;
       setStatus('<span class="dot">●</span> Connected');
       document.body.classList.remove("connecting");
       $("callBtn").classList.add("hidden");
@@ -140,11 +143,8 @@
         $("transcript").classList.add("hidden");
 
         // 1. Ask our server for a room + join token (this also launches Mira).
-        //    Pass the Firebase uid from the URL so Mira loads this user's
-        //    onboarding profile and greets them by name.
-        const params = new URLSearchParams(location.search);
-        const uid = params.get("uid") || "";
-        const mode = params.get("mode") || "";   // "ongoing" = Step-3 ask-Mira call
+        //    uid + mode (read at page load) tell the server which user this is
+        //    and which call (onboarding vs ongoing Step-3).
         const res = await fetch("/connect", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -180,7 +180,6 @@
           $("hint").textContent = "Mic is off — enable it to talk back to Mira";
         }
 
-        $("chatLink").classList.add("hidden");
         showConnected();
       } catch (err) {
         setStatus("Could not connect");
@@ -202,8 +201,14 @@
       $("callBtn").disabled = false;
       $("timer").textContent = "";
       setStatus("Call ended");
+      // After the ONBOARDING call (Step 2) finishes, move the user into the
+      // ongoing Step-3 "talk to Mira" call. On the Step-3 call itself, just let
+      // them tap the green button to talk again. There is no chat screen.
+      if (didConnect && mode !== "ongoing" && uid) {
+        window.location.replace("/?uid=" + encodeURIComponent(uid) + "&mode=ongoing");
+        return;
+      }
       $("hint").textContent = "Tap the green button to talk to Mira again";
-      $("chatLink").classList.remove("hidden");
     }
 
     $("callBtn").addEventListener("click", startCall);
