@@ -286,7 +286,7 @@ class _CaptionObserver(BaseObserver):
 # --------------------------------------------------------------------------- #
 async def run_livekit_bot(room_name: str, system_prompt: str, *,
                           firebase_uid=None, user_id="", run_id="",
-                          mode="onboarding", existing_memory=None):
+                          mode="onboarding", existing_memory=None, existing_open_loops=None):
     """Join `room_name` as Mira, run the conversation, then consolidate memory."""
     _log(f"bot starting room={room_name} mode={mode} prompt_chars={len(system_prompt)}")
     url = os.getenv("LIVEKIT_URL")
@@ -396,7 +396,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
             user_turns = sum(1 for m in context.get_messages() if m.get("role") == "user")
             if user_turns >= 1:
                 _log(f"consolidating room={room_name} turns={user_turns}")
-                result = consolidate.consolidate(existing_memory or {}, transcript)
+                result = consolidate.consolidate(existing_memory or {}, existing_open_loops or [], transcript)
                 memory_store.save_consolidation(
                     firebase_uid=firebase_uid, user_id=user_id, run_id=run_id,
                     session_type=mode, started_at=started_at,
@@ -511,6 +511,7 @@ async def connect(request: Request):
         room_name, system_prompt,
         firebase_uid=firebase_uid, user_id=user_id, run_id=run_id,
         mode=mode, existing_memory=(memory or {}).get("long_term_memory", {}),
+        existing_open_loops=(memory or {}).get("open_loops", []),
     ))
 
     return {"url": url, "token": user_token, "room": room_name,
