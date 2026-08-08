@@ -15,6 +15,7 @@ Balance — lean HEAVY on English for common/modern words (this is how real urba
 Script (this decides pronunciation — the voice reads each word by the script it's written in):
 - Write Hindi words in **Devanagari** (देवनागरी), including Indian names/places (ध्रुव, गुड़गाँव). **NEVER** romanize Hindi.
 - Write English words in the **English alphabet** (week, routine, diet).
+- Use ONLY Devanagari or English letters — NEVER any other script (no Chinese, Japanese, Arabic, or Gurmukhi/Punjabi characters). If unsure of a character, use the English word instead.
 
 Examples:
 - ✅ CASUAL & RIGHT: "नमस्ते ध्रुव! क्या हाल है? week कैसा चल रहा है?"

@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -65,6 +66,7 @@ try:
     )
     from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
+    from pipecat.utils.text.base_text_filter import BaseTextFilter
     from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
     from pipecat.services.groq.llm import GroqLLMService
@@ -218,6 +220,24 @@ def _log(msg: str) -> None:
     print("[mira]", line, flush=True)
 
 
+# Mira must only ever say/show Hindi (Devanagari) or English. LLMs occasionally
+# leak a stray character from another script (e.g. a CJK token). This keeps only
+# Devanagari + printable ASCII + whitespace + a few common punctuation marks and
+# strips everything else — applied to both the spoken audio (TTS) and captions.
+_FOREIGN_CHARS = re.compile(r"[^ऀ-ॿ -~\s–—‘’“”…]")
+
+
+def _strip_foreign(text: str) -> str:
+    return _FOREIGN_CHARS.sub("", text or "")
+
+
+class ScriptTextFilter(BaseTextFilter):
+    """TTS filter: remove non-Hindi/English characters before speech synthesis."""
+
+    async def filter(self, text: str) -> str:
+        return _strip_foreign(text)
+
+
 class _DiagObserver(BaseObserver):
     """Non-intrusive observer that records the greeting pipeline's milestones —
     LLM responding, TTS producing audio, bot speaking — and any ErrorFrame, so
@@ -256,7 +276,7 @@ class _CaptionObserver(BaseObserver):
         self._bot_text: list = []       # accumulate Mira's streamed tokens
 
     async def _send(self, role: str, text: str):
-        text = (text or "").strip()
+        text = _strip_foreign(text).strip()  # captions: Hindi/English only
         if not text:
             return
         try:
@@ -308,10 +328,15 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         ),
     )
 
-    # STT: Sarvam Saarika — built for Indian languages + Hinglish code-mixing.
+    # STT: Sarvam Saarika. Force Hindi (hi-IN) instead of auto-detect — auto-detect
+    # was mis-reading Hindi speech as Punjabi/Gurmukhi. saarika:v2.5 still handles
+    # English words (Hinglish) spoken within Hindi.
     stt = SarvamSTTService(
         api_key=os.getenv("SARVAM_API_KEY"),
-        model=os.getenv("STT_MODEL", "saarika:v2.5"),
+        settings=SarvamSTTService.Settings(
+            model=os.getenv("STT_MODEL", "saarika:v2.5"),
+            language=Language.HI_IN,
+        ),
     )
 
     # Groq LLM for reasoning — very fast (LPU) time-to-first-token. Default to
@@ -331,6 +356,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     # override with ELEVENLABS_VOICE_ID / ELEVENLABS_MODEL.
     tts = ElevenLabsTTSService(
         api_key=os.getenv("ELEVENLABS_API_KEY"),
+        text_filters=[ScriptTextFilter()],  # strip any stray non-Hindi/English chars
         settings=ElevenLabsTTSService.Settings(
             voice=os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),  # "Sarah" (premade)
             model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
