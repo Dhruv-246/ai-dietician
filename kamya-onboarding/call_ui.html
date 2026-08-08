@@ -49,8 +49,9 @@
     .btn svg { width: 34px; height: 34px; fill: #fff; }
     .hidden { display: none !important; }
     .hint { font-size: 13px; color: #8aa596; margin-top: 10px; }
-    .chat-link { margin-top: 14px; font-size: 15px; font-weight: 700; color: #23a95a; text-decoration: none; }
-    .chat-link:hover { text-decoration: underline; }
+    .outbtn { margin-top: 16px; padding: 8px 16px; border-radius: 999px; border: 1px solid #cfe6d8;
+      background: #ffffff; color: #23643f; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .outbtn:active { transform: scale(0.96); }
     .transcript {
       width: min(620px, 92%); max-height: 32vh; overflow-y: auto;
       display: flex; flex-direction: column; gap: 8px; margin: 6px 0 2px;
@@ -87,6 +88,7 @@
     </button>
   </div>
   <div class="hint" id="hint">Tap the green button to talk to Mira</div>
+  <button id="outBtn" class="outbtn hidden" type="button">🔈 Earpiece</button>
 
   <audio id="botAudio" autoplay></audio>
 
@@ -110,6 +112,53 @@
     }
     function stopTimer() { clearInterval(timerInt); }
 
+    // --- Ringback tone: the "calling…" sound while Mira picks up ----------
+    let audioCtx = null, ringTimer = null;
+    function startRing() {
+      try {
+        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+      } catch (_) { return; }
+      const beep = (at, freq) => {
+        const osc = audioCtx.createOscillator(), g = audioCtx.createGain();
+        osc.type = "sine"; osc.frequency.value = freq;
+        osc.connect(g); g.connect(audioCtx.destination);
+        g.gain.setValueAtTime(0.0001, at);
+        g.gain.exponentialRampToValueAtTime(0.14, at + 0.02);
+        g.gain.setValueAtTime(0.14, at + 0.33);
+        g.gain.exponentialRampToValueAtTime(0.0001, at + 0.4);
+        osc.start(at); osc.stop(at + 0.42);
+      };
+      const ringOnce = () => {
+        if (!audioCtx) return;
+        const t = audioCtx.currentTime;
+        beep(t, 440); beep(t + 0.6, 480);   // classic two-tone ring
+      };
+      ringOnce();
+      ringTimer = setInterval(ringOnce, 2600);
+    }
+    function stopRing() { if (ringTimer) { clearInterval(ringTimer); ringTimer = null; } }
+
+    // --- Audio output: earpiece (default) vs speaker ----------------------
+    // Best-effort: browsers only let a web page pick the output device where
+    // setSinkId is supported (desktop + newer Android Chrome). On iOS it's not
+    // available, so the toggle is hidden there and the OS controls routing.
+    let speakerOn = false;   // false = earpiece (default), true = speaker
+    const canRoute = "setSinkId" in HTMLMediaElement.prototype;
+    async function applyOutput() {
+      if (!canRoute) return;
+      try {
+        const outs = (await navigator.mediaDevices.enumerateDevices())
+          .filter((d) => d.kind === "audiooutput");
+        const find = (re) => outs.find((d) => re.test(d.label || ""));
+        let dev = speakerOn ? find(/speaker|speakerphone/i) : find(/earpiece|receiver|handset/i);
+        if (!dev) dev = outs.find((d) => d.deviceId === (speakerOn ? "default" : "communications")) || outs[0];
+        if (dev) await $("botAudio").setSinkId(dev.deviceId);
+      } catch (_) {}
+      $("outBtn").textContent = speakerOn ? "🔊 Speaker" : "🔈 Earpiece";
+    }
+    function toggleOutput() { speakerOn = !speakerOn; applyOutput(); }
+
     function addCaption(role, text) {
       const box = $("transcript");
       box.classList.remove("hidden");
@@ -126,21 +175,24 @@
 
     function showConnected() {
       didConnect = true;
+      stopRing();
       setStatus('<span class="dot">●</span> Connected');
       document.body.classList.remove("connecting");
       $("callBtn").classList.add("hidden");
       $("hangBtn").classList.remove("hidden");
       startTimer();
+      if (canRoute) { $("outBtn").classList.remove("hidden"); applyOutput(); }
     }
 
     async function startCall() {
       try {
         $("callBtn").disabled = true;
-        setStatus('<span class="dot">●</span> Connecting…');
+        setStatus('<span class="dot">●</span> Calling Mira…');
         document.body.classList.add("connecting");
         $("hint").textContent = "";
         $("transcript").innerHTML = "";
         $("transcript").classList.add("hidden");
+        startRing();   // ringback until Mira answers
 
         // 1. Ask our server for a room + join token (this also launches Mira).
         //    uid + mode (read at page load) tell the server which user this is
@@ -175,13 +227,19 @@
         //    missing, stay connected anyway so the user can still HEAR Mira
         //    (they just won't be able to talk back until they enable it).
         try {
-          await room.localParticipant.setMicrophoneEnabled(true);
+          // Echo cancellation + noise suppression so Mira's own voice and
+          // background noise don't feed back into the mic and cause false
+          // interruptions.
+          await room.localParticipant.setMicrophoneEnabled(true, {
+            echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+          });
         } catch (micErr) {
           $("hint").textContent = "Mic is off — enable it to talk back to Mira";
         }
 
         showConnected();
       } catch (err) {
+        stopRing();
         setStatus("Could not connect");
         $("hint").textContent = String(err.message || err);
         document.body.classList.remove("connecting");
@@ -193,6 +251,8 @@
 
     async function endCall() {
       stopTimer();
+      stopRing();
+      $("outBtn").classList.add("hidden");
       try { if (room) await room.disconnect(); } catch (_) {}
       room = null;
       document.body.classList.remove("connecting");
@@ -213,6 +273,7 @@
 
     $("callBtn").addEventListener("click", startCall);
     $("hangBtn").addEventListener("click", endCall);
+    $("outBtn").addEventListener("click", toggleOutput);
   </script>
 </body>
 </html>

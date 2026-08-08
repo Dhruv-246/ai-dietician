@@ -63,6 +63,8 @@ try:
         LLMContextAggregatorPair,
         LLMUserAggregatorParams,
     )
+    from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+    from pipecat.turns.user_turn_strategies import UserTurnStrategies
     from pipecat.services.cartesia.tts import CartesiaTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
     from pipecat.services.groq.llm import GroqLLMService
@@ -332,18 +334,24 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         ),
     )
 
-    # Barge-in (interruptions) in Pipecat 1.7.0 is driven by the user aggregator's
-    # VAD controller — the VAD analyzer MUST be passed here (not to the transport).
-    # When the VAD detects the user starting to speak while Mira is talking, the
-    # turn controller fires an interruption that stops her TTS immediately.
-    # stop_secs = how long of silence before Mira takes her turn. The default
-    # (~0.8s) makes replies feel late; 0.45s is snappier while still letting the
-    # user finish a sentence (the smart-turn analyzer guards against cut-offs).
+    # Turn-taking + barge-in, tuned to NOT trip on background noise / speaker echo:
+    #  - VAD: higher confidence + min_volume so quiet background isn't treated as
+    #    speech; stop_secs=0.5 keeps replies snappy without cutting the user off.
+    #  - Interruptions require >= 2 actual transcribed WORDS (MinWords strategy).
+    #    A cough, background TV, or residual speaker echo won't produce two clean
+    #    words, so it can't barge in on Mira — but a deliberate couple of words
+    #    still interrupts her immediately. (When Mira isn't speaking, one word
+    #    starts a normal turn, so responsiveness is unchanged.)
     context = LLMContext([{"role": "system", "content": system_prompt}])
     aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(stop_secs=0.45)),
+            vad_analyzer=SileroVADAnalyzer(params=VADParams(
+                confidence=0.8, start_secs=0.2, stop_secs=0.5, min_volume=0.75,
+            )),
+            user_turn_strategies=UserTurnStrategies(
+                start=[MinWordsUserTurnStartStrategy(min_words=2)],
+            ),
         ),
     )
 
