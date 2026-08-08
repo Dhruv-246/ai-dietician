@@ -5,7 +5,7 @@ interview in Hinglish. Media is carried by LiveKit Cloud (a managed WebRTC
 media server), so the call connects reliably from any host — including
 Railway, which cannot do peer-to-peer WebRTC.
 
-Pipeline:   mic → Sarvam STT → Groq (Llama-70B) → Cartesia TTS → speaker
+Pipeline:   mic → Sarvam STT → Groq (Llama-70B) → Sarvam bulbul TTS → speaker
 Features:   barge-in (interruptions), Silero VAD turn-taking, streaming.
 
 How it works:
@@ -16,7 +16,7 @@ How it works:
     the audio both ways, so no direct UDP path to the server is needed.
 
 Run locally:  python bot.py  → open the printed URL.
-Requires: GROQ_API_KEY, SARVAM_API_KEY, CARTESIA_API_KEY and
+Requires: GROQ_API_KEY, SARVAM_API_KEY (STT + TTS) and
           LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET.
 """
 import argparse
@@ -65,7 +65,7 @@ try:
     )
     from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
-    from pipecat.services.cartesia.tts import CartesiaTTSService
+    from pipecat.services.sarvam.tts import SarvamTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
     from pipecat.services.groq.llm import GroqLLMService
     from pipecat.transcriptions.language import Language
@@ -92,7 +92,7 @@ if _ENV_PATH.exists():
 
 # Fail early with a clear message if any required key is missing/blank.
 _REQUIRED = [
-    "GROQ_API_KEY", "SARVAM_API_KEY", "CARTESIA_API_KEY",
+    "GROQ_API_KEY", "SARVAM_API_KEY",
     "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
 ]
 _missing = [k for k in _REQUIRED if not os.getenv(k)]
@@ -324,12 +324,15 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         settings=GroqLLMService.Settings(model=groq_model),
     )
 
-    # TTS: multilingual + Hindi so Devanagari in replies is pronounced right.
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        settings=CartesiaTTSService.Settings(
-            voice=os.getenv("CARTESIA_VOICE_ID", "71a7ad14-091c-4e8e-a314-022ece01c121"),
-            model=os.getenv("CARTESIA_MODEL", "sonic-3.5"),
+    # TTS: Sarvam "bulbul" — built for Indian languages AND Hinglish code-mixing,
+    # so mixed Hindi (Devanagari) + English (Latin) is spoken cleanly. This fixes
+    # the garbled / "non-word" speech Cartesia produced when forced into Hindi
+    # mode on code-mixed text. Reuses the Sarvam key (no separate TTS key).
+    tts = SarvamTTSService(
+        api_key=os.getenv("SARVAM_API_KEY"),
+        settings=SarvamTTSService.Settings(
+            voice=os.getenv("SARVAM_VOICE", "anushka"),
+            model=os.getenv("SARVAM_TTS_MODEL", "bulbul:v2"),
             language=Language.HI,
         ),
     )
