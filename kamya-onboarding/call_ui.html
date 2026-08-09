@@ -5,37 +5,58 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Mira — Kamya Wellness</title>
   <style>
+    /* Step-2 (onboarding) = green. Step-3 (ongoing "ask anything") = blue. Light only. */
+    :root{
+      --bg: linear-gradient(180deg,#dff3e6 0%,#eaf7ef 55%,#ffffff 100%);
+      --accent:#23a95a; --accent-2:#43d67e;
+      --ring: radial-gradient(circle,#ffffff 60%,rgba(35,169,90,.16) 100%);
+      --pulse: rgba(35,169,90,.4); --pulse0: rgba(35,169,90,0);
+      --eyebrow-bg: rgba(35,169,90,.12); --eyebrow-fg:#1c6b3f;
+      --bubble-user:#cdeed9; --bubble-mira-border:#e2efe7;
+      --ink:#12261c; --muted:#6b8577;
+    }
+    body.ongoing{
+      --bg: linear-gradient(180deg,#e4edfb 0%,#eef4fc 55%,#ffffff 100%);
+      --accent:#2f6fed; --accent-2:#5b8ff5;
+      --ring: radial-gradient(circle,#ffffff 60%,rgba(47,111,237,.16) 100%);
+      --pulse: rgba(47,111,237,.4); --pulse0: rgba(47,111,237,0);
+      --eyebrow-bg: rgba(47,111,237,.12); --eyebrow-fg:#1e4fb0;
+      --bubble-user:#dbe7fb; --bubble-mira-border:#e2e9f6;
+      --ink:#101a2e; --muted:#5a6b86;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       min-height: 100vh; min-height: 100dvh;
-      background: linear-gradient(180deg, #dff3e6 0%, #eaf7ef 55%, #ffffff 100%);
-      color: #12261c;
+      background: var(--bg); color: var(--ink);
       display: flex; flex-direction: column; align-items: center;
-      justify-content: space-between; padding: 48px 24px 56px; text-align: center;
+      justify-content: space-between; padding: 40px 24px 48px; text-align: center;
     }
-    .status { font-size: 16px; color: #6b8577; font-weight: 600; }
-    .status .dot { color: #34c759; }
-    .center { display: flex; flex-direction: column; align-items: center; gap: 22px; margin-top: 8px; }
+    .top { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+    .brand { font-size: 15px; font-weight: 700; color: var(--muted); letter-spacing: .02em; }
+    .eyebrow { font-size: 11.5px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase;
+      color: var(--eyebrow-fg); background: var(--eyebrow-bg); padding: 5px 13px; border-radius: 999px; }
+    .center { display: flex; flex-direction: column; align-items: center; gap: 12px; }
     .avatar-ring {
-      width: 220px; height: 220px; border-radius: 50%;
-      display: grid; place-items: center;
-      background: radial-gradient(circle, #ffffff 60%, rgba(52,199,89,0.15) 100%);
+      width: 200px; height: 200px; border-radius: 50%;
+      display: grid; place-items: center; background: var(--ring);
       box-shadow: 0 0 0 10px rgba(255,255,255,0.7), 0 20px 50px rgba(0,0,0,0.08);
     }
     .avatar {
-      width: 180px; height: 180px; border-radius: 50%;
-      background: #cfe9d8 url("mira_avatar.jpg") center/cover no-repeat;
-      display: grid; place-items: center; font-size: 74px;
+      width: 168px; height: 168px; border-radius: 50%;
+      background: #dfeee6 url("mira_avatar.jpg") center/cover no-repeat;
       border: 4px solid #fff;
     }
     body.connecting .avatar-ring { animation: pulse 1.4s ease-out infinite; }
     @keyframes pulse {
-      0% { box-shadow: 0 0 0 10px rgba(255,255,255,0.7), 0 0 0 0 rgba(52,199,89,0.4); }
-      100% { box-shadow: 0 0 0 10px rgba(255,255,255,0.7), 0 0 0 40px rgba(52,199,89,0); }
+      0% { box-shadow: 0 0 0 10px rgba(255,255,255,0.7), 0 0 0 0 var(--pulse); }
+      100% { box-shadow: 0 0 0 10px rgba(255,255,255,0.7), 0 0 0 40px var(--pulse0); }
     }
-    .name { font-size: 34px; font-weight: 800; letter-spacing: -0.02em; }
-    .timer { font-size: 18px; color: #2e9e5b; font-weight: 600; min-height: 22px; }
+    .name { font-size: 32px; font-weight: 800; letter-spacing: -0.02em; }
+    .subtitle { font-size: 16px; color: var(--muted); margin-top: -4px; }
+    .status { font-size: 15px; color: var(--muted); font-weight: 600; min-height: 20px; }
+    .status .dot { color: var(--accent); }
+    .timer { font-size: 18px; color: var(--accent); font-weight: 700; min-height: 20px; }
     .controls { display: flex; gap: 28px; align-items: center; }
     .btn {
       width: 82px; height: 82px; border-radius: 50%; border: none; cursor: pointer;
@@ -44,34 +65,39 @@
     }
     .btn:active { transform: scale(0.94); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn.green { background: linear-gradient(145deg, #43d67e, #23a95a); }
+    .btn.green { background: linear-gradient(145deg, var(--accent-2), var(--accent)); }
     .btn.red { background: linear-gradient(145deg, #ff5b5b, #e53935); }
     .btn svg { width: 34px; height: 34px; fill: #fff; }
     .hidden { display: none !important; }
-    .hint { font-size: 13px; color: #8aa596; margin-top: 10px; }
-    .outbtn { margin-top: 16px; padding: 8px 16px; border-radius: 999px; border: 1px solid #cfe6d8;
-      background: #ffffff; color: #23643f; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .hint { font-size: 13.5px; color: var(--muted); margin-top: 10px; max-width: 340px; }
+    .outbtn { margin-top: 14px; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--eyebrow-bg);
+      background: #ffffff; color: var(--eyebrow-fg); font-size: 14px; font-weight: 600; cursor: pointer; }
     .outbtn:active { transform: scale(0.96); }
     .transcript {
-      width: min(620px, 92%); max-height: 32vh; overflow-y: auto;
-      display: flex; flex-direction: column; gap: 8px; margin: 6px 0 2px;
+      width: min(620px, 92%); max-height: 30vh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px; margin: 4px 0;
     }
     .msg { max-width: 82%; padding: 9px 13px; border-radius: 16px; font-size: 15px; line-height: 1.35; text-align: left; }
-    .msg .who { display: block; font-size: 11px; font-weight: 700; color: #6b8577; margin-bottom: 2px; }
-    .msg.user { align-self: flex-end; background: #cdeed9; border-bottom-right-radius: 5px; }
-    .msg.mira { align-self: flex-start; background: #fff; border: 1px solid #e2efe7; border-bottom-left-radius: 5px; }
+    .msg .who { display: block; font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 2px; }
+    .msg.user { align-self: flex-end; background: var(--bubble-user); border-bottom-right-radius: 5px; }
+    .msg.mira { align-self: flex-start; background: #fff; border: 1px solid var(--bubble-mira-border); border-bottom-left-radius: 5px; }
   </style>
   <!-- LiveKit browser SDK (managed WebRTC — connects reliably from any host) -->
   <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
 </head>
 <body>
-  <div class="status" id="status">Kamya Wellness</div>
+  <div class="top">
+    <div class="brand">Kamya Wellness</div>
+    <div class="eyebrow" id="eyebrow"></div>
+  </div>
 
   <div class="center">
     <div class="avatar-ring">
       <div class="avatar" id="avatar"></div>
     </div>
     <div class="name">Mira</div>
+    <div class="subtitle" id="subtitle"></div>
+    <div class="status" id="status"></div>
     <div class="timer" id="timer"></div>
   </div>
 
@@ -99,6 +125,26 @@
     const params = new URLSearchParams(location.search);
     const uid = params.get("uid") || "";
     const mode = params.get("mode") || "";   // "ongoing" = Step-3 ask-Mira call; else onboarding call
+
+    // Distinct identity for the two products (light theme only):
+    //   Step 2 = onboarding call (green) · Step 3 = ongoing "ask anything" (blue).
+    const MODES = {
+      onboarding: {
+        cls: "onboarding", eyebrow: "Step 1 · Onboarding call",
+        subtitle: "Let's set up your plan",
+        hint: "Proceed to have your onboarding call with Mira",
+      },
+      ongoing: {
+        cls: "ongoing", eyebrow: "Your AI dietician",
+        subtitle: "Ask me anything",
+        hint: "Tap to talk — ask Mira any question about your food, diet or health",
+      },
+    };
+    const cfg = MODES[mode === "ongoing" ? "ongoing" : "onboarding"];
+    document.body.classList.add(cfg.cls);
+    $("eyebrow").textContent = cfg.eyebrow;
+    $("subtitle").textContent = cfg.subtitle;
+    $("hint").textContent = cfg.hint;
 
     function setStatus(t) { $("status").innerHTML = t; }
     function startTimer() {
@@ -268,7 +314,7 @@
         window.location.replace("/?uid=" + encodeURIComponent(uid) + "&mode=ongoing");
         return;
       }
-      $("hint").textContent = "Tap the green button to talk to Mira again";
+      $("hint").textContent = cfg.hint;
     }
 
     $("callBtn").addEventListener("click", startCall);
