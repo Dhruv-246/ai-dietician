@@ -68,6 +68,7 @@ try:
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
     from pipecat.utils.text.base_text_filter import BaseTextFilter
     from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+    from pipecat.services.sarvam.tts import SarvamTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
     from pipecat.services.groq.llm import GroqLLMService
     from pipecat.transcriptions.language import Language
@@ -94,7 +95,9 @@ if _ENV_PATH.exists():
 
 # Fail early with a clear message if any required key is missing/blank.
 _REQUIRED = [
-    "GROQ_API_KEY", "SARVAM_API_KEY", "ELEVENLABS_API_KEY",
+    # ELEVENLABS_API_KEY is optional — if it's missing or out of credits, TTS
+    # falls back to Sarvam bulbul (which uses SARVAM_API_KEY).
+    "GROQ_API_KEY", "SARVAM_API_KEY",
     "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
 ]
 _missing = [k for k in _REQUIRED if not os.getenv(k)]
@@ -231,6 +234,30 @@ def _strip_foreign(text: str) -> str:
     return _FOREIGN_CHARS.sub("", text or "")
 
 
+def _elevenlabs_has_credits() -> bool:
+    """True if ElevenLabs is usable right now: key present, valid, and enough
+    monthly credits left for a call. Any failure (no key, 401/402, network, low
+    balance) returns False so TTS falls back to Sarvam bulbul — Mira never goes
+    silent. Threshold is a full-call buffer so we don't switch to ElevenLabs
+    only to run dry mid-call. (Blocking call — run via asyncio.to_thread.)"""
+    key = os.getenv("ELEVENLABS_API_KEY")
+    if not key:
+        return False
+    import urllib.request
+    min_left = int(os.getenv("ELEVENLABS_MIN_CREDITS", "1500"))
+    req = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/user/subscription",
+        headers={"xi-api-key": key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+        remaining = data.get("character_limit", 0) - data.get("character_count", 0)
+        return remaining >= min_left
+    except Exception:
+        return False
+
+
 class ScriptTextFilter(BaseTextFilter):
     """TTS filter: remove non-Hindi/English characters before speech synthesis."""
 
@@ -349,20 +376,35 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         settings=GroqLLMService.Settings(model=groq_model),
     )
 
-    # TTS: ElevenLabs multilingual (eleven_flash_v2_5) — low-latency and strong at
-    # natural ENGLISH (names, words like "routine") while still handling Hindi, so
-    # code-mixed Hinglish sounds right. (Sarvam bulbul spoke Hindi well but mangled
-    # English; Cartesia was the reverse.) Default is a premade female voice;
-    # override with ELEVENLABS_VOICE_ID / ELEVENLABS_MODEL.
-    tts = ElevenLabsTTSService(
-        api_key=os.getenv("ELEVENLABS_API_KEY"),
-        text_filters=[ScriptTextFilter()],  # strip any stray non-Hindi/English chars
-        settings=ElevenLabsTTSService.Settings(
-            voice=os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),  # "Sarah" (premade)
-            model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
-            language=Language.HI,
-        ),
-    )
+    # TTS with automatic fallback (both get the sanitizer so only Hindi/English
+    # is ever spoken):
+    #  - PREFER ElevenLabs (eleven_flash_v2_5) — best natural English + names —
+    #    whenever the account has credits.
+    #  - FALL BACK to Sarvam bulbul (free, Hindi-first, English slightly accented)
+    #    when ElevenLabs is out of monthly credits / key missing, so Mira never
+    #    goes silent. Checked once at call start, off the audio path.
+    if await asyncio.to_thread(_elevenlabs_has_credits):
+        _log(f"tts=elevenlabs room={room_name}")
+        tts = ElevenLabsTTSService(
+            api_key=os.getenv("ELEVENLABS_API_KEY"),
+            text_filters=[ScriptTextFilter()],
+            settings=ElevenLabsTTSService.Settings(
+                voice=os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),  # "Sarah" (premade)
+                model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
+                language=Language.HI,
+            ),
+        )
+    else:
+        _log(f"tts=sarvam-bulbul (fallback) room={room_name}")
+        tts = SarvamTTSService(
+            api_key=os.getenv("SARVAM_API_KEY"),
+            text_filters=[ScriptTextFilter()],
+            settings=SarvamTTSService.Settings(
+                voice=os.getenv("SARVAM_VOICE", "anushka"),
+                model=os.getenv("SARVAM_TTS_MODEL", "bulbul:v2"),
+                language=Language.HI,
+            ),
+        )
 
     # Turn-taking + barge-in, tuned to NOT trip on background noise / speaker echo:
     #  - VAD: higher confidence + min_volume so quiet background isn't treated as
