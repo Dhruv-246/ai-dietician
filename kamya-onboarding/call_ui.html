@@ -36,6 +36,9 @@
     .brand { font-size: 15px; font-weight: 700; color: var(--muted); letter-spacing: .02em; }
     .eyebrow { font-size: 11.5px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase;
       color: var(--eyebrow-fg); background: var(--eyebrow-bg); padding: 5px 13px; border-radius: 999px; }
+    .memlink { font-size: 12.5px; font-weight: 700; color: var(--eyebrow-fg); text-decoration: none;
+      background: var(--eyebrow-bg); padding: 6px 13px; border-radius: 999px; }
+    .memlink:active { transform: scale(0.96); }
     .center { display: flex; flex-direction: column; align-items: center; gap: 12px; }
     .avatar-ring {
       width: 200px; height: 200px; border-radius: 50%;
@@ -89,6 +92,7 @@
   <div class="top">
     <div class="brand">Kamya Wellness</div>
     <div class="eyebrow" id="eyebrow"></div>
+    <a class="memlink hidden" id="memLink" target="_blank" rel="noopener">🧠 What Mira remembers</a>
   </div>
 
   <div class="center">
@@ -145,6 +149,13 @@
     $("eyebrow").textContent = cfg.eyebrow;
     $("subtitle").textContent = cfg.subtitle;
     $("hint").textContent = cfg.hint;
+
+    // Step-3 only: a touch point to view what Mira remembers about this user.
+    if (cfg.cls === "ongoing" && uid) {
+      const m = $("memLink");
+      m.href = "/memory?uid=" + encodeURIComponent(uid);
+      m.classList.remove("hidden");
+    }
 
     function setStatus(t) { $("status").innerHTML = t; }
     function startTimer() {

@@ -550,6 +550,109 @@ async def healthz():
     return {"ok": True}
 
 
+@app.get("/memory", response_class=HTMLResponse)
+async def memory_view(request: Request):
+    """Readable view of a user's long-term memory, open loops, and session
+    history. Prototype view — anyone with the uid can see it, so keep it
+    auth-gated before production (it's personal health data)."""
+    import html as _html
+    uid = request.query_params.get("uid")
+    if not uid:
+        return HTMLResponse("<p style='font-family:sans-serif;padding:40px'>Add <code>?uid=…</code> to view a user's memory.</p>")
+
+    mem = memory_store.load_memory(uid)
+    user_id = mem.get("user_id", "")
+    try:
+        profile = profile_store.load_profile_for_uid(uid)
+    except Exception:
+        profile = {}
+    name = profile.get("name") or "This user"
+    ltm = mem.get("long_term_memory") or {}
+    sessions = memory_store.get_sessions(user_id) if user_id else []
+
+    def esc(x):
+        return _html.escape(str(x))
+
+    def ul(items):
+        items = [i for i in (items or []) if str(i).strip()]
+        if not items:
+            return "<p class='empty'>— nothing yet —</p>"
+        return "<ul>" + "".join(f"<li>{esc(i)}</li>" for i in items) + "</ul>"
+
+    ltm_html = "".join(
+        f"<h3>{lbl}</h3>{ul(ltm.get(k))}"
+        for lbl, k in (("Facts", "facts"), ("Goals", "goals"),
+                       ("Preferences", "preferences"), ("Dislikes", "dislikes"))
+    )
+
+    sess_html = ""
+    for s in sessions:
+        sess_html += (
+            "<div class='card'><div class='meta'>"
+            f"<span class='pill'>{esc(s.get('type', '') or 'session')}</span>"
+            f"<span class='when'>{esc(s.get('ended_at', '') or s.get('started_at', ''))}</span>"
+            f"<span class='rid'>{esc(s.get('session_id', ''))}</span></div>"
+            f"<p class='sum'>{esc(s.get('session_summary') or '—')}</p>"
+            + ul(memory_store.parse_loops(s.get('open_loops'))) + "</div>"
+        )
+    if not sess_html:
+        sess_html = "<p class='empty'>No sessions recorded yet.</p>"
+
+    page = f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mira's memory — {esc(name)}</title>
+<style>
+  :root{{ --accent:#2f6fed; --accent-bg:rgba(47,111,237,.1); --accent-fg:#1e4fb0;
+    --ink:#101a2e; --muted:#5a6b86; --line:#e2e9f6; --bg:#eef4fc; --card:#fff; }}
+  *{{box-sizing:border-box;margin:0;padding:0;}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg);color:var(--ink);line-height:1.5;padding:28px 18px 60px;}}
+  .wrap{{max-width:680px;margin:0 auto;}}
+  .eyebrow{{font-size:11.5px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent-fg);background:var(--accent-bg);padding:5px 12px;border-radius:999px;display:inline-block;}}
+  h1{{font-size:30px;margin:12px 0 4px;letter-spacing:-.02em;}}
+  .sub{{color:var(--muted);font-size:14px;margin-bottom:24px;}}
+  section{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:16px;}}
+  h2{{font-size:16px;color:var(--accent-fg);margin-bottom:10px;letter-spacing:.01em;}}
+  h3{{font-size:12.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin:12px 0 4px;}}
+  h3:first-of-type{{margin-top:0;}}
+  ul{{padding-left:18px;}} li{{margin:3px 0;}}
+  .empty{{color:#9aa7bd;font-style:italic;font-size:14px;}}
+  .card{{border:1px solid var(--line);border-radius:12px;padding:13px 15px;margin-top:10px;background:#fbfdff;}}
+  .meta{{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:6px;}}
+  .pill{{background:var(--accent-bg);color:var(--accent-fg);font-weight:700;padding:2px 9px;border-radius:999px;text-transform:capitalize;}}
+  .rid{{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#9aa7bd;margin-left:auto;}}
+  .sum{{font-size:14.5px;margin-bottom:6px;}}
+  .card ul{{font-size:13.5px;color:var(--muted);}}
+</style></head><body>
+<div class="wrap">
+  <span class="eyebrow">Mira's memory</span>
+  <h1>{esc(name)}</h1>
+  <p class="sub">{esc(user_id or 'unknown user')} · check-in #{esc(mem.get('session_count') or 0)} · last call: {esc(mem.get('last_session_at') or '—')}</p>
+
+  <section>
+    <h2>🧠 Long-term memory (latest)</h2>
+    {ltm_html}
+  </section>
+
+  <section>
+    <h2>🔁 Open loops — to follow up next time</h2>
+    {ul(mem.get('open_loops'))}
+  </section>
+
+  <section>
+    <h2>📝 Last session summary</h2>
+    <p>{esc(mem.get('last_session_summary') or '—')}</p>
+  </section>
+
+  <section>
+    <h2>📚 Session history (newest first)</h2>
+    {sess_html}
+  </section>
+</div></body></html>"""
+    return HTMLResponse(page)
+
+
 @app.post("/connect")
 async def connect(request: Request):
     """Create a room, launch Mira into it, and return the browser's join token.

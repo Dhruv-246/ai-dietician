@@ -127,6 +127,26 @@ def load_memory(firebase_uid):
         return default
 
 
+def get_sessions(user_id, limit=15):
+    """Return this user's recent session records (newest first)."""
+    user_id = str(user_id or "").strip()
+    if not user_id:
+        return []
+    try:
+        ensure_schema()
+        rows = _sessions_ws().get_all_records()
+    except Exception as exc:
+        print(f"[memory] sessions read failed: {exc}", flush=True)
+        return []
+    mine = [r for r in rows if str(r.get("user_id", "")).strip() == user_id]
+    return list(reversed(mine))[:limit]
+
+
+def parse_loops(raw):
+    """Parse an open_loops cell (JSON list string) into a Python list."""
+    return _parse_json(raw, [])
+
+
 def save_consolidation(firebase_uid, user_id, run_id, session_type,
                        started_at, ended_at, merged_memory, session_summary, open_loops):
     """Merge-write updated memory to the Users row and append a Sessions row.
