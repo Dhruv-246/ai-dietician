@@ -48,6 +48,13 @@ def onboarding_page():
     return send_from_directory(app.static_folder, "onboarding.html")
 
 
+@app.get("/logout")
+def logout_page():
+    """Sign the user out of Firebase, then redirect to /login. Reached from the
+    Step-3 call screen's logout link (Firebase auth lives on this web origin)."""
+    return send_from_directory(app.static_folder, "logout.html")
+
+
 def _verify_firebase_request():
     """Verify the Firebase ID token on the request.
 

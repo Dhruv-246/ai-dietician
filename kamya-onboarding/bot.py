@@ -598,6 +598,11 @@ async def memory_view(request: Request):
     if not sess_html:
         sess_html = "<p class='empty'>No sessions recorded yet.</p>"
 
+    try:
+        prompt_text = esc((_HERE / "ask_prompt.md").read_text(encoding="utf-8"))
+    except Exception:
+        prompt_text = "(prompt file not found)"
+
     page = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mira's memory — {esc(name)}</title>
@@ -624,6 +629,12 @@ async def memory_view(request: Request):
   .rid{{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:#9aa7bd;margin-left:auto;}}
   .sum{{font-size:14.5px;margin-bottom:6px;}}
   .card ul{{font-size:13.5px;color:var(--muted);}}
+  details.promptbox>summary{{cursor:pointer;list-style:none;font-size:16px;font-weight:700;color:var(--accent-fg);}}
+  details.promptbox>summary::-webkit-details-marker{{display:none;}}
+  details.promptbox>summary::after{{content:" ▸ tap to expand";font-size:12px;font-weight:600;color:var(--muted);}}
+  details.promptbox[open]>summary::after{{content:" ▾ tap to collapse";font-size:12px;font-weight:600;color:var(--muted);}}
+  details.promptbox pre{{margin:12px 0 0;white-space:pre-wrap;word-wrap:break-word;font-family:ui-monospace,Menlo,monospace;
+    font-size:12.5px;line-height:1.55;color:var(--ink);max-height:55vh;overflow:auto;background:#f7faff;border:1px solid var(--line);border-radius:10px;padding:14px;}}
 </style></head><body>
 <div class="wrap">
   <span class="eyebrow">Mira's memory</span>
@@ -648,6 +659,13 @@ async def memory_view(request: Request):
   <section>
     <h2>📚 Session history (newest first)</h2>
     {sess_html}
+  </section>
+
+  <section>
+    <details class="promptbox">
+      <summary>⚙️ System prompt — how Mira is told to behave (Step 3)</summary>
+      <pre>{prompt_text}</pre>
+    </details>
   </section>
 </div></body></html>"""
     return HTMLResponse(page)

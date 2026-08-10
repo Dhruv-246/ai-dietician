@@ -76,6 +76,8 @@
     .outbtn { margin-top: 14px; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--eyebrow-bg);
       background: #ffffff; color: var(--eyebrow-fg); font-size: 14px; font-weight: 600; cursor: pointer; }
     .outbtn:active { transform: scale(0.96); }
+    .logoutlink { margin-top: 18px; font-size: 13px; font-weight: 600; color: var(--muted);
+      text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
     .transcript {
       width: min(620px, 92%); max-height: 30vh; overflow-y: auto;
       display: flex; flex-direction: column; gap: 8px; margin: 4px 0;
@@ -119,6 +121,7 @@
   </div>
   <div class="hint" id="hint">Tap the green button to talk to Mira</div>
   <button id="outBtn" class="outbtn hidden" type="button">🔈 Earpiece</button>
+  <a id="logoutLink" class="logoutlink hidden">Log out</a>
 
   <audio id="botAudio" autoplay></audio>
 
@@ -150,11 +153,18 @@
     $("subtitle").textContent = cfg.subtitle;
     $("hint").textContent = cfg.hint;
 
-    // Step-3 only: a touch point to view what Mira remembers about this user.
-    if (cfg.cls === "ongoing" && uid) {
-      const m = $("memLink");
-      m.href = "/memory?uid=" + encodeURIComponent(uid);
-      m.classList.remove("hidden");
+    // Step-3 only: touch points to view what Mira remembers + to log out.
+    // (Logout runs on the web app origin, where the Firebase session lives.)
+    const WEB_APP_URL = "https://web-production-45f0d.up.railway.app";
+    if (cfg.cls === "ongoing") {
+      if (uid) {
+        const m = $("memLink");
+        m.href = "/memory?uid=" + encodeURIComponent(uid);
+        m.classList.remove("hidden");
+      }
+      const lo = $("logoutLink");
+      lo.href = WEB_APP_URL + "/logout";
+      lo.classList.remove("hidden");
     }
 
     function setStatus(t) { $("status").innerHTML = t; }
