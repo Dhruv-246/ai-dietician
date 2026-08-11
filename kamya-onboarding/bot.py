@@ -356,15 +356,22 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         ),
     )
 
-    # STT: Sarvam Saarika. Force Hindi (hi-IN) instead of auto-detect — auto-detect
-    # was mis-reading Hindi speech as Punjabi/Gurmukhi. saarika:v2.5 still handles
-    # English words (Hinglish) spoken within Hindi.
+    # STT: Sarvam Saarika. Default to AUTO-DETECT ("unknown"), which returns
+    # code-mixed Hinglish — Hindi words in Devanagari, English words kept in
+    # Latin (e.g. "protein", "gym"). Forcing hi-IN (the old setting) transliterated
+    # every English word into Devanagari, which we don't want. Auto-detect is why
+    # we'd previously seen occasional Punjabi/Gurmukhi mis-reads; if that comes
+    # back, set STT_LANGUAGE=hi-IN to force full Devanagari again.
+    stt_kwargs = dict(model=os.getenv("STT_MODEL", "saarika:v2.5"))
+    _stt_lang = os.getenv("STT_LANGUAGE", "auto").strip().lower()
+    if _stt_lang in ("hi", "hi-in", "hindi"):
+        stt_kwargs["language"] = Language.HI_IN
+        _log("stt language=hi-IN (forced Devanagari)")
+    else:
+        _log("stt language=auto (code-mixed Hinglish)")
     stt = SarvamSTTService(
         api_key=os.getenv("SARVAM_API_KEY"),
-        settings=SarvamSTTService.Settings(
-            model=os.getenv("STT_MODEL", "saarika:v2.5"),
-            language=Language.HI_IN,
-        ),
+        settings=SarvamSTTService.Settings(**stt_kwargs),
     )
 
     # LLM for Mira's responses: Gemini 3.5 Flash — strong, natural Hinglish and
