@@ -64,6 +64,7 @@ try:
         LLMContextAggregatorPair,
         LLMUserAggregatorParams,
     )
+    from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
     from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
     from pipecat.utils.text.base_text_filter import BaseTextFilter
@@ -86,6 +87,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 import consolidate
 import memory_store
+import rag
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
 # is no .env — the platform injects the variables into the environment directly.
@@ -331,6 +333,54 @@ class _CaptionObserver(BaseObserver):
             await self._send("assistant", full)
 
 
+class RAGProcessor(FrameProcessor):
+    """RAG injection. Sits between STT and the user aggregator. On each final
+    user transcription it retrieves the closest dietician Q&A from Supabase and
+    refreshes the base system prompt with a REFERENCE block (or clears it when
+    nothing relevant is found), so Mira answers in style — not by copying.
+
+    Why refresh the FIRST system message (not append a new one): Gemini only
+    honours a single system instruction, so the reference must live inside the
+    base prompt. We keep the original prompt in `self._base` and rebuild
+    messages[0] each turn = base [+ references]. It never accumulates, and any
+    retrieval error leaves the base prompt untouched (call proceeds normally)."""
+
+    def __init__(self, context, *, top_k: int = 3, min_similarity: float = 0.5):
+        super().__init__()
+        self._context = context
+        self._top_k = top_k
+        self._min_sim = min_similarity
+        msgs = context.get_messages()
+        self._base = (msgs[0].get("content") if msgs else "") or ""
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        # Only act on the user's FINAL transcription, flowing downstream.
+        if (
+            direction == FrameDirection.DOWNSTREAM
+            and isinstance(frame, TranscriptionFrame)
+            and (getattr(frame, "text", "") or "").strip()
+        ):
+            try:
+                await self._refresh(frame.text.strip())
+            except Exception as exc:  # never break the call over retrieval
+                _log(f"rag refresh failed room=? : {exc}")
+        await self.push_frame(frame, direction)
+
+    async def _refresh(self, question: str):
+        matches = await rag.retrieve(question, k=self._top_k, min_similarity=self._min_sim)
+        msgs = self._context.get_messages()
+        if not msgs:
+            return
+        if matches:
+            content = self._base + "\n\n" + rag.format_reference(matches)
+            _log(f"rag matched {len(matches)} q='{question[:40]}'")
+        else:
+            content = self._base
+        msgs[0] = {**msgs[0], "role": msgs[0].get("role", "system"), "content": content}
+        self._context.set_messages(msgs)
+
+
 # --------------------------------------------------------------------------- #
 # The voice pipeline for a single call, joined to one LiveKit room.            #
 # --------------------------------------------------------------------------- #
@@ -445,17 +495,31 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         ),
     )
 
-    pipeline = Pipeline(
-        [
-            transport.input(),        # mic in (from LiveKit)
-            stt,                      # speech -> text
-            aggregator.user(),        # add user turn to context
-            llm,                      # reasoning
-            tts,                      # text -> speech
-            transport.output(),       # speaker out (to LiveKit)
-            aggregator.assistant(),   # add bot turn to context
-        ]
-    )
+    # RAG: if a knowledge base is configured, retrieve reference Q&A per user
+    # turn and fold them into the system prompt (RAGProcessor). Off by default
+    # when SUPABASE_URL/KEY or GOOGLE_API_KEY are absent — Mira just answers
+    # from her own knowledge + the user's memory.
+    stages = [
+        transport.input(),            # mic in (from LiveKit)
+        stt,                          # speech -> text
+    ]
+    if rag.enabled():
+        _log(f"rag enabled room={room_name} top_k={os.getenv('RAG_TOP_K', '3')}")
+        stages.append(RAGProcessor(
+            context,
+            top_k=int(os.getenv("RAG_TOP_K", "3")),
+            min_similarity=float(os.getenv("RAG_MIN_SIMILARITY", "0.5")),
+        ))
+    else:
+        _log(f"rag disabled room={room_name} (no supabase/google key)")
+    stages += [
+        aggregator.user(),            # add user turn to context
+        llm,                          # reasoning (sees any injected references)
+        tts,                          # text -> speech
+        transport.output(),           # speaker out (to LiveKit)
+        aggregator.assistant(),       # add bot turn to context
+    ]
+    pipeline = Pipeline(stages)
 
     # Note: `allow_interruptions` no longer exists in Pipecat 1.7.0 — barge-in is
     # configured on the user aggregator's VAD above, not here.
