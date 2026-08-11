@@ -552,6 +552,29 @@ async def healthz():
     return {"ok": True}
 
 
+@app.get("/gemini-models")
+async def gemini_models():
+    """Temporary: list the Gemini models this key can use (to see 2.5 vs 3)."""
+    import urllib.request
+    key = os.getenv("GOOGLE_API_KEY") or ""
+    req = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200",
+        headers={"x-goog-api-key": key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        names = [m.get("name", "").replace("models/", "") for m in data.get("models", [])
+                 if "generateContent" in (m.get("supportedGenerationMethods") or [])]
+        return {
+            "in_use": os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+            "flash_models": sorted(n for n in names if "flash" in n),
+            "has_gemini_3": any(n.startswith("gemini-3") for n in names),
+        }
+    except Exception as exc:
+        return {"error": str(exc)[:300]}
+
+
 @app.get("/memory", response_class=HTMLResponse)
 async def memory_view(request: Request):
     """Readable view of a user's long-term memory, open loops, and session
