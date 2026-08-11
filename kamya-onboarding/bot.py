@@ -395,6 +395,14 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
                 voice=os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),  # "Sarah" (premade)
                 model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
                 language=Language.HI,
+                # Consistent, calm delivery. Without these, flash_v2_5 runs on its
+                # expressive defaults and randomly spikes volume/pitch on some
+                # sentences ("suddenly rises its voice"). High stability + no
+                # speaker-boost + zero style = steady loudness. Env-tunable.
+                stability=float(os.getenv("ELEVENLABS_STABILITY", "0.8")),
+                similarity_boost=float(os.getenv("ELEVENLABS_SIMILARITY", "0.75")),
+                style=float(os.getenv("ELEVENLABS_STYLE", "0.0")),
+                use_speaker_boost=os.getenv("ELEVENLABS_SPEAKER_BOOST", "0") == "1",
             ),
         )
     else:
