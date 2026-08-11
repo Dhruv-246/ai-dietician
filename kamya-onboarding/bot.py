@@ -70,7 +70,7 @@ try:
     from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
     from pipecat.services.sarvam.tts import SarvamTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
-    from pipecat.services.groq.llm import GroqLLMService
+    from pipecat.services.google.llm import GoogleLLMService
     from pipecat.transcriptions.language import Language
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.runner.livekit import generate_token, generate_token_with_agent
@@ -95,9 +95,10 @@ if _ENV_PATH.exists():
 
 # Fail early with a clear message if any required key is missing/blank.
 _REQUIRED = [
-    # ELEVENLABS_API_KEY is optional — if it's missing or out of credits, TTS
-    # falls back to Sarvam bulbul (which uses SARVAM_API_KEY).
-    "GROQ_API_KEY", "SARVAM_API_KEY",
+    # GOOGLE_API_KEY drives Mira's live responses (Gemini). GROQ_API_KEY is used
+    # only for the background memory consolidation. ELEVENLABS_API_KEY is optional
+    # — if missing/out of credits, TTS falls back to Sarvam bulbul (SARVAM_API_KEY).
+    "GOOGLE_API_KEY", "GROQ_API_KEY", "SARVAM_API_KEY",
     "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
 ]
 _missing = [k for k in _REQUIRED if not os.getenv(k)]
@@ -366,14 +367,15 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         ),
     )
 
-    # Groq LLM for reasoning — very fast (LPU) time-to-first-token. Default to
-    # llama-3.1-8b-instant. The free tier has a daily token cap; if it's hit,
-    # swap GROQ_API_KEY for a fresh key. Override the model with GROQ_MODEL.
-    groq_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-    _log(f"llm groq model={groq_model}")
-    llm = GroqLLMService(
-        api_key=os.getenv("GROQ_API_KEY"),
-        settings=GroqLLMService.Settings(model=groq_model),
+    # LLM for Mira's responses: Gemini 2.5 Flash — strong, natural Hinglish and
+    # good instruction-following (a quality upgrade over Llama-70B). Override
+    # with GEMINI_MODEL. (Groq is still used, but ONLY for the cheap background
+    # memory consolidation in consolidate.py — not for live responses.)
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    _log(f"llm gemini model={gemini_model}")
+    llm = GoogleLLMService(
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        settings=GoogleLLMService.Settings(model=gemini_model),
     )
 
     # TTS with automatic fallback (both get the sanitizer so only Hindi/English
