@@ -272,6 +272,22 @@ class ScriptTextFilter(BaseTextFilter):
         return _strip_foreign(text)
 
 
+class StylePrefixTextFilter(BaseTextFilter):
+    """TTS filter (Gemini ONLY): prepend a natural-language style directive so
+    Gemini TTS speaks in that style. Gemini treats a leading instruction as
+    delivery steering and does NOT speak it. Never use with ElevenLabs/Sarvam —
+    they would read the directive aloud."""
+
+    def __init__(self, style: str):
+        super().__init__()
+        self._style = (style or "").strip()
+
+    async def filter(self, text: str) -> str:
+        if not self._style or not (text or "").strip():
+            return text
+        return f"{self._style}: {text}"
+
+
 class _DiagObserver(BaseObserver):
     """Non-intrusive observer that records the greeting pipeline's milestones —
     LLM responding, TTS producing audio, bot speaking — and any ErrorFrame, so
@@ -502,11 +518,24 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
 
     if _tts_engine == "gemini":
         gemini_tts_model = os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
-        _log(f"tts=gemini model={gemini_tts_model} voice={os.getenv('GEMINI_TTS_VOICE', 'Kore')} room={room_name}")
+        # Style control: the API-key backend ignores the `prompt` Setting, but it
+        # honours a style directive prepended to the text (and does NOT speak it).
+        # StylePrefixTextFilter injects GEMINI_TTS_STYLE for consistent delivery.
+        # Default = casual/upbeat Indian (the sample the user picked). Set the env
+        # to "" to disable, or to any instruction to change Mira's vocal style.
+        gemini_style = os.getenv(
+            "GEMINI_TTS_STYLE",
+            "Speak in a friendly, casual, upbeat Indian tone, slightly slow and clear",
+        )
+        tts_filters = [ScriptTextFilter()]
+        if gemini_style.strip():
+            tts_filters.append(StylePrefixTextFilter(gemini_style))
+        _log(f"tts=gemini model={gemini_tts_model} voice={os.getenv('GEMINI_TTS_VOICE', 'Kore')} "
+             f"style={'on' if gemini_style.strip() else 'off'} room={room_name}")
         tts = GeminiTTSService(
             api_key=os.getenv("GOOGLE_API_KEY"),
             use_genai=True,  # use the Gemini API key path (not GCP creds)
-            text_filters=[ScriptTextFilter()],
+            text_filters=tts_filters,
             settings=GeminiTTSService.Settings(
                 model=gemini_tts_model,
                 voice=os.getenv("GEMINI_TTS_VOICE", "Kore"),
