@@ -523,10 +523,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # StylePrefixTextFilter injects GEMINI_TTS_STYLE for consistent delivery.
         # Default = casual/upbeat Indian (the sample the user picked). Set the env
         # to "" to disable, or to any instruction to change Mira's vocal style.
-        gemini_style = os.getenv(
-            "GEMINI_TTS_STYLE",
-            "Speak in a friendly, casual, upbeat Indian tone, slightly slow and clear",
-        )
+        gemini_style = os.getenv("GEMINI_TTS_STYLE", "")  # off by default — normal delivery
         tts_filters = [ScriptTextFilter()]
         if gemini_style.strip():
             tts_filters.append(StylePrefixTextFilter(gemini_style))
@@ -535,6 +532,8 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         tts = GeminiTTSService(
             api_key=os.getenv("GOOGLE_API_KEY"),
             use_genai=True,  # use the Gemini API key path (not GCP creds)
+            sample_rate=24000,  # Gemini TTS outputs 24kHz PCM; pin it so LiveKit
+                                # resamples correctly (mislabeled rate = silence/garble)
             text_filters=tts_filters,
             settings=GeminiTTSService.Settings(
                 model=gemini_tts_model,
