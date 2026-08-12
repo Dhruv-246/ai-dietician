@@ -453,7 +453,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
             api_key=os.getenv("ELEVENLABS_API_KEY"),
             text_filters=[ScriptTextFilter()],
             settings=ElevenLabsTTSService.Settings(
-                voice=os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL"),  # "Sarah" (premade)
+                voice=os.getenv("ELEVENLABS_VOICE_ID", "TRnaQb7q41oL7sV0w6Bu"),  # "Simran" — Indian-accented female (natural Hinglish)
                 model=os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
                 language=Language.HI,
                 # Consistent, calm delivery. Without these, flash_v2_5 runs on its
@@ -634,37 +634,6 @@ async def avatar():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
-
-
-@app.get("/el-voices")
-async def el_voices():
-    """Temporary: list ElevenLabs voices available to this key, highlighting any
-    Indian/Hindi ones (so we can pick a natural Hinglish voice)."""
-    import urllib.request
-    key = os.getenv("ELEVENLABS_API_KEY") or ""
-    req = urllib.request.Request(
-        "https://api.elevenlabs.io/v2/voices?page_size=100",
-        headers={"xi-api-key": key},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.loads(r.read())
-        out = []
-        for v in data.get("voices", []):
-            labels = v.get("labels") or {}
-            blob = " ".join(str(x).lower() for x in labels.values())
-            name = (v.get("name") or "").lower()
-            indian = ("india" in blob or "hindi" in blob or "india" in name or "hindi" in name)
-            out.append({
-                "voice_id": v.get("voice_id"),
-                "name": v.get("name"),
-                "labels": labels,
-                "indianish": indian,
-            })
-        out.sort(key=lambda x: not x["indianish"])
-        return {"count": len(out), "voices": out}
-    except Exception as exc:
-        return {"error": str(exc)[:300]}
 
 
 @app.get("/memory", response_class=HTMLResponse)
