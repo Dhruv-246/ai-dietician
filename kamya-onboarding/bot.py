@@ -75,6 +75,7 @@ try:
     from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
     from pipecat.services.google.llm import GoogleLLMService
     from pipecat.services.deepseek.llm import DeepSeekLLMService
+    from pipecat.services.groq.llm import GroqLLMService
     from pipecat.transcriptions.language import Language
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.runner.livekit import generate_token, generate_token_with_agent
@@ -443,12 +444,13 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         )
 
     # LLM engine. LLM_ENGINE env:
-    #  - "deepseek" (DEFAULT): DeepSeek (deepseek-reasoner — a THINKING model;
-    #    smarter but higher latency on voice; its hidden reasoning is not spoken).
-    #  - "gemini": Gemini (GEMINI_MODEL, default gemini-3.5-flash) — faster.
-    # Falls back to Gemini if DEEPSEEK_API_KEY is missing so the bot never fails.
-    # (Groq is still used only for background memory consolidation in consolidate.py.)
-    _llm_engine = os.getenv("LLM_ENGINE", "deepseek").strip().lower()
+    #  - "groq" (DEFAULT): Groq llama-3.3-70b-versatile — fast, free, good Hinglish.
+    #    Not a reasoning model (answers directly), which is best for voice latency.
+    #  - "deepseek": DeepSeek deepseek-reasoner (thinking model; needs a PAID key).
+    #  - "gemini": Gemini (GEMINI_MODEL, default gemini-3.5-flash).
+    # Model overridable via GROQ_MODEL / DEEPSEEK_MODEL / GEMINI_MODEL. Groq is the
+    # safe default because GROQ_API_KEY is always set (also used for consolidation).
+    _llm_engine = os.getenv("LLM_ENGINE", "groq").strip().lower()
     if _llm_engine == "deepseek" and os.getenv("DEEPSEEK_API_KEY"):
         deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-reasoner")
         _log(f"llm=deepseek model={deepseek_model} room={room_name}")
@@ -456,14 +458,21 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
             api_key=os.getenv("DEEPSEEK_API_KEY"),
             settings=DeepSeekLLMService.Settings(model=deepseek_model),
         )
-    else:
-        if _llm_engine == "deepseek":
-            _log(f"llm=gemini (DEEPSEEK_API_KEY missing) room={room_name}")
+    elif _llm_engine == "gemini":
         gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
         _log(f"llm=gemini model={gemini_model} room={room_name}")
         llm = GoogleLLMService(
             api_key=os.getenv("GOOGLE_API_KEY"),
             settings=GoogleLLMService.Settings(model=gemini_model),
+        )
+    else:  # groq (default; also the fallback when deepseek is requested w/o a key)
+        if _llm_engine == "deepseek":
+            _log(f"llm=groq (DEEPSEEK_API_KEY missing) room={room_name}")
+        groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        _log(f"llm=groq model={groq_model} room={room_name}")
+        llm = GroqLLMService(
+            api_key=os.getenv("GROQ_API_KEY"),
+            settings=GroqLLMService.Settings(model=groq_model),
         )
 
     # TTS engine selection. TTS_ENGINE env:
