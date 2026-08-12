@@ -421,12 +421,23 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     if _stt_engine == "deepgram" and os.getenv("DEEPGRAM_API_KEY"):
         dg_model = os.getenv("DEEPGRAM_STT_MODEL", "flux-general-multi")
         _log(f"stt=deepgram-flux model={dg_model} hints=hi,en room={room_name}")
+        # Flux has BUILT-IN turn-taking:
+        #  - End-of-turn: detects when the user is done (semantic + acoustic, incl.
+        #    trailing "hmm"/pauses) -> emits final transcript so Mira replies.
+        #  - Barge-in: on the user speaking again it interrupts Mira's speech.
+        # Tunables (env, optional): DEEPGRAM_EOT_THRESHOLD (confidence, def 0.7),
+        # DEEPGRAM_EOT_TIMEOUT_MS (hard cap, def 5000), DEEPGRAM_EAGER_EOT (enable
+        # early-response prediction; lower = snappier but more re-tries).
+        flux_kwargs = dict(model=dg_model, language_hints=[Language.HI, Language.EN])
+        if os.getenv("DEEPGRAM_EOT_THRESHOLD"):
+            flux_kwargs["eot_threshold"] = float(os.getenv("DEEPGRAM_EOT_THRESHOLD"))
+        if os.getenv("DEEPGRAM_EOT_TIMEOUT_MS"):
+            flux_kwargs["eot_timeout_ms"] = int(os.getenv("DEEPGRAM_EOT_TIMEOUT_MS"))
+        if os.getenv("DEEPGRAM_EAGER_EOT"):
+            flux_kwargs["eager_eot_threshold"] = float(os.getenv("DEEPGRAM_EAGER_EOT"))
         stt = DeepgramFluxSTTService(
             api_key=os.getenv("DEEPGRAM_API_KEY"),
-            settings=DeepgramFluxSTTService.Settings(
-                model=dg_model,
-                language_hints=[Language.HI, Language.EN],
-            ),
+            settings=DeepgramFluxSTTService.Settings(**flux_kwargs),
         )
     else:
         if _stt_engine == "deepgram":
