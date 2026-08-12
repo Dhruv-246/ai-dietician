@@ -632,23 +632,6 @@ async def healthz():
     return {"ok": True}
 
 
-@app.get("/rag-status")
-async def rag_status():
-    """Temporary: confirm RAG is live in prod (env vars + embeddings + Supabase)."""
-    out = {"enabled": rag.enabled(), "model": rag.EMBED_MODEL, "dim": rag.EMBED_DIM}
-    if rag.enabled():
-        try:
-            matches = await rag.retrieve("protein kitna lena chahiye", k=2, min_similarity=0.0)
-            out["sample_query"] = "protein kitna lena chahiye"
-            out["matches"] = [
-                {"q": m.get("question"), "sim": round(float(m.get("similarity", 0)), 3)}
-                for m in matches
-            ]
-        except Exception as exc:
-            out["error"] = str(exc)[:200]
-    return out
-
-
 @app.get("/memory", response_class=HTMLResponse)
 async def memory_view(request: Request):
     """Readable view of a user's long-term memory, open loops, and session
