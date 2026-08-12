@@ -69,6 +69,7 @@ try:
     from pipecat.turns.user_turn_strategies import UserTurnStrategies
     from pipecat.utils.text.base_text_filter import BaseTextFilter
     from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+    from pipecat.services.google.tts import GeminiTTSService
     from pipecat.services.sarvam.tts import SarvamTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
     from pipecat.services.google.llm import GoogleLLMService
@@ -436,18 +437,33 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         settings=GoogleLLMService.Settings(model=gemini_model),
     )
 
-    # TTS engine selection. TTS_ENGINE env: "auto" (default) uses ElevenLabs when
-    # it has credits else Sarvam; "sarvam" forces Sarvam bulbul (native Indian
-    # accent — most natural for Hinglish); "elevenlabs" forces ElevenLabs.
-    # Both engines get the sanitizer so only Hindi/English is ever spoken.
-    _tts_engine = os.getenv("TTS_ENGINE", "auto").strip().lower()
-    if _tts_engine == "sarvam":
-        use_eleven = False
+    # TTS engine selection. TTS_ENGINE env:
+    #  - "gemini" (DEFAULT): Gemini TTS (gemini-3.1-flash-tts-preview) via the
+    #    GenAI backend — uses the existing GOOGLE_API_KEY (no GCP service account).
+    #    ONE voice speaks both Hindi and English, so the accent stays consistent
+    #    (fixes the "accent keeps changing / not humanized" issue). NOTE: it's a
+    #    preview model with free-tier quota — if it runs out, set TTS_ENGINE=sarvam.
+    #  - "sarvam": Sarvam bulbul — native Indian accent, free, very reliable.
+    #  - "elevenlabs": ElevenLabs (Indian "Simran" voice needs a PAID plan/owned voice).
+    #  - "auto": ElevenLabs when it has credits, else Sarvam.
+    # All engines get the sanitizer so only Hindi/English is ever spoken.
+    _tts_engine = os.getenv("TTS_ENGINE", "gemini").strip().lower()
+    if _tts_engine == "auto":
+        _tts_engine = "elevenlabs" if await asyncio.to_thread(_elevenlabs_has_credits) else "sarvam"
+
+    if _tts_engine == "gemini":
+        gemini_tts_model = os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+        _log(f"tts=gemini model={gemini_tts_model} voice={os.getenv('GEMINI_TTS_VOICE', 'Kore')} room={room_name}")
+        tts = GeminiTTSService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            use_genai=True,  # use the Gemini API key path (not GCP creds)
+            text_filters=[ScriptTextFilter()],
+            settings=GeminiTTSService.Settings(
+                model=gemini_tts_model,
+                voice=os.getenv("GEMINI_TTS_VOICE", "Kore"),
+            ),
+        )
     elif _tts_engine == "elevenlabs":
-        use_eleven = True
-    else:  # auto
-        use_eleven = await asyncio.to_thread(_elevenlabs_has_credits)
-    if use_eleven:
         _log(f"tts=elevenlabs room={room_name}")
         tts = ElevenLabsTTSService(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
@@ -466,8 +482,8 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
                 use_speaker_boost=os.getenv("ELEVENLABS_SPEAKER_BOOST", "0") == "1",
             ),
         )
-    else:
-        _log(f"tts=sarvam-bulbul (fallback) room={room_name}")
+    else:  # sarvam
+        _log(f"tts=sarvam-bulbul room={room_name}")
         tts = SarvamTTSService(
             api_key=os.getenv("SARVAM_API_KEY"),
             text_filters=[ScriptTextFilter()],
@@ -636,76 +652,6 @@ async def healthz():
     return {"ok": True}
 
 
-@app.get("/diag")
-async def diag():
-    """Temporary: end-to-end health of LLM, embeddings, and TTS (why Mira is silent)."""
-    import urllib.error
-    import urllib.request
-
-    out = {}
-
-    # 1) Gemini LLM (the words Mira would say)
-    try:
-        import google.genai as genai
-        gc = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-        model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-        r = await asyncio.to_thread(
-            lambda: gc.models.generate_content(model=model, contents="Reply with the single word OK.")
-        )
-        out["gemini_llm"] = {"ok": True, "model": model, "text": (getattr(r, "text", "") or "")[:60]}
-    except Exception as e:
-        out["gemini_llm"] = {"ok": False, "error": str(e)[:400]}
-
-    # 2) Gemini embeddings (RAG)
-    try:
-        e = await asyncio.to_thread(rag.embed, "test", "RETRIEVAL_QUERY")
-        out["gemini_embed"] = {"ok": True, "dims": len(e)}
-    except Exception as ex:
-        out["gemini_embed"] = {"ok": False, "error": str(ex)[:300]}
-
-    key = os.getenv("ELEVENLABS_API_KEY") or ""
-
-    # 3) ElevenLabs subscription / credits
-    try:
-        req = urllib.request.Request(
-            "https://api.elevenlabs.io/v1/user/subscription", headers={"xi-api-key": key}
-        )
-        with urllib.request.urlopen(req, timeout=15) as rr:
-            sub = json.loads(rr.read())
-        used, lim = sub.get("character_count"), sub.get("character_limit")
-        out["elevenlabs_sub"] = {
-            "ok": True, "status": sub.get("status"), "tier": sub.get("tier"),
-            "used": used, "limit": lim,
-            "remaining": (lim - used) if (lim is not None and used is not None) else None,
-        }
-    except urllib.error.HTTPError as he:
-        out["elevenlabs_sub"] = {"ok": False, "http": he.code, "body": he.read().decode()[:200]}
-    except Exception as ex:
-        out["elevenlabs_sub"] = {"ok": False, "error": str(ex)[:200]}
-
-    # 4) ElevenLabs actual synthesis with the configured voice/model
-    vid = os.getenv("ELEVENLABS_VOICE_ID", "TRnaQb7q41oL7sV0w6Bu")
-    try:
-        body = json.dumps({
-            "text": "namaste",
-            "model_id": os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
-        }).encode()
-        req = urllib.request.Request(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{vid}",
-            data=body, headers={"xi-api-key": key, "Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=20) as rr:
-            audio = rr.read()
-        out["elevenlabs_tts"] = {"ok": True, "voice": vid, "audio_bytes": len(audio)}
-    except urllib.error.HTTPError as he:
-        out["elevenlabs_tts"] = {"ok": False, "voice": vid, "http": he.code, "body": he.read().decode()[:250]}
-    except Exception as ex:
-        out["elevenlabs_tts"] = {"ok": False, "voice": vid, "error": str(ex)[:250]}
-
-    # 5) which engine the bot would pick right now
-    out["tts_engine_setting"] = os.getenv("TTS_ENGINE", "auto").lower()
-    out["elevenlabs_has_credits_fn"] = _elevenlabs_has_credits()
-    return out
 
 
 @app.get("/memory", response_class=HTMLResponse)
