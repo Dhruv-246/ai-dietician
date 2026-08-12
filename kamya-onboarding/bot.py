@@ -571,26 +571,32 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
             ),
         )
 
-    # Turn-taking + barge-in, tuned to NOT trip on background noise / speaker echo:
-    #  - VAD: higher confidence + min_volume so quiet background isn't treated as
-    #    speech; stop_secs=0.5 keeps replies snappy without cutting the user off.
-    #  - Interruptions require >= 2 actual transcribed WORDS (MinWords strategy).
-    #    A cough, background TV, or residual speaker echo won't produce two clean
-    #    words, so it can't barge in on Mira — but a deliberate couple of words
-    #    still interrupts her immediately. (When Mira isn't speaking, one word
-    #    starts a normal turn, so responsiveness is unchanged.)
+    # Turn-taking + barge-in. CRITICAL: there must be exactly ONE turn authority.
+    #  - Deepgram Flux does its OWN end-of-turn + interruption. Adding a second VAD
+    #    here makes Mira get interrupted the instant she starts speaking (audio is
+    #    cancelled -> "text appears but no sound"). So with Flux, use a plain
+    #    aggregator and let Flux drive turns/barge-in.
+    #  - Sarvam has NO turn detection, so it needs the aggregator's SileroVAD:
+    #    confidence/min_volume tuned so noise/echo isn't treated as speech, and
+    #    interruptions require >= 2 transcribed words.
     context = LLMContext([{"role": "system", "content": system_prompt}])
-    aggregator = LLMContextAggregatorPair(
-        context,
-        user_params=LLMUserAggregatorParams(
-            vad_analyzer=SileroVADAnalyzer(params=VADParams(
-                confidence=0.8, start_secs=0.2, stop_secs=0.5, min_volume=0.75,
-            )),
-            user_turn_strategies=UserTurnStrategies(
-                start=[MinWordsUserTurnStartStrategy(min_words=2)],
+    _flux_active = _stt_engine == "deepgram" and bool(os.getenv("DEEPGRAM_API_KEY"))
+    if _flux_active:
+        _log(f"turn-taking: Deepgram Flux (single authority) room={room_name}")
+        aggregator = LLMContextAggregatorPair(context)
+    else:
+        _log(f"turn-taking: aggregator SileroVAD room={room_name}")
+        aggregator = LLMContextAggregatorPair(
+            context,
+            user_params=LLMUserAggregatorParams(
+                vad_analyzer=SileroVADAnalyzer(params=VADParams(
+                    confidence=0.8, start_secs=0.2, stop_secs=0.5, min_volume=0.75,
+                )),
+                user_turn_strategies=UserTurnStrategies(
+                    start=[MinWordsUserTurnStartStrategy(min_words=2)],
+                ),
             ),
-        ),
-    )
+        )
 
     # RAG: if a knowledge base is configured, retrieve reference Q&A per user
     # turn and fold them into the system prompt (RAGProcessor). Off by default
@@ -727,45 +733,6 @@ async def avatar():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
-
-
-@app.get("/diag-tts")
-async def diag_tts():
-    """Temporary: run Gemini TTS streaming from THIS server (Railway's key) to see
-    why audio isn't reaching the call — quota/error/empty."""
-    import time
-    from google import genai
-    from google.genai import types
-
-    model = os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
-    voice = os.getenv("GEMINI_TTS_VOICE", "Kore")
-    out = {"model": model, "voice": voice, "tts_engine": os.getenv("TTS_ENGINE", "gemini")}
-    try:
-        c = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-        cfg = types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice))),
-        )
-        t0 = time.time()
-        first = None
-        total = 0
-        chunks = 0
-        resp = await c.aio.models.generate_content_stream(
-            model=model, contents="नमस्ते! Main Mira hoon.", config=cfg
-        )
-        async for chunk in resp:
-            if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
-                for p in chunk.candidates[0].content.parts:
-                    if p.inline_data and p.inline_data.data:
-                        if first is None:
-                            first = round(time.time() - t0, 2)
-                        total += len(p.inline_data.data)
-                        chunks += 1
-        out.update({"ok": total > 0, "ttfb_s": first, "chunks": chunks, "audio_bytes": total})
-    except Exception as exc:
-        out.update({"ok": False, "error": str(exc)[:400]})
-    return out
 
 
 
