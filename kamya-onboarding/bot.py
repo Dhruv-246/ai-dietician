@@ -527,7 +527,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         _tts_engine = "elevenlabs" if await asyncio.to_thread(_elevenlabs_has_credits) else "sarvam"
 
     if _tts_engine == "gemini":
-        gemini_tts_model = os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+        gemini_tts_model = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
         # Style control: the API-key backend ignores the `prompt` Setting, but it
         # honours a style directive prepended to the text (and does NOT speak it).
         # StylePrefixTextFilter injects GEMINI_TTS_STYLE for consistent delivery.
