@@ -31,7 +31,11 @@ import os
 
 import httpx
 
-EMBED_MODEL = os.getenv("EMBED_MODEL", "text-embedding-004")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "gemini-embedding-001")
+# gemini-embedding-001 defaults to 3072 dims but supports Matryoshka truncation;
+# pin to 768 to match the vector(768) column. Cosine ranking is scale-invariant,
+# so truncated vectors still rank correctly.
+EMBED_DIM = int(os.getenv("EMBED_DIM", "768"))
 TABLE = os.getenv("RAG_TABLE", "dietician_qa")
 RPC = os.getenv("RAG_RPC", "match_dietician_qa")
 
@@ -57,7 +61,9 @@ def embed(text: str, task_type: str = "RETRIEVAL_QUERY") -> list[float]:
     resp = _genai_client().models.embed_content(
         model=EMBED_MODEL,
         contents=text,
-        config=types.EmbedContentConfig(task_type=task_type),
+        config=types.EmbedContentConfig(
+            task_type=task_type, output_dimensionality=EMBED_DIM
+        ),
     )
     return list(resp.embeddings[0].values)
 

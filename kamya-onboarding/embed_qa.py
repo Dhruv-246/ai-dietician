@@ -21,6 +21,8 @@ import sys
 import time
 from pathlib import Path
 
+import re
+
 import httpx
 
 # load kamya-onboarding/.env if present (so secrets don't need to be exported)
@@ -34,11 +36,31 @@ except Exception:
 import rag  # noqa: E402  (reuses embed() + vec_literal())
 
 BATCH = 25
+SLEEP = float(os.getenv("RAG_EMBED_SLEEP", "0.7"))  # spacing to stay under free-tier RPM
 
 
 def _fatal(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def _embed_retry(text: str, tries: int = 6) -> list[float]:
+    """Embed with backoff on 429 (free tier is 100 req/min)."""
+    delay = 8.0
+    for attempt in range(tries):
+        try:
+            return rag.embed(text, task_type="RETRIEVAL_DOCUMENT")
+        except Exception as ex:
+            s = str(ex)
+            if "429" in s or "RESOURCE_EXHAUSTED" in s:
+                m = re.search(r"retry in ([0-9.]+)s", s) or re.search(r"([0-9.]+)s", s)
+                wait = (float(m.group(1)) + 1) if m else delay
+                print(f"    rate-limited; waiting {wait:.0f}s (attempt {attempt + 1}/{tries})")
+                time.sleep(wait)
+                delay = min(delay * 1.5, 45)
+                continue
+            raise
+    _fatal("embedding kept hitting the rate limit — try again in a minute")
 
 
 def main() -> None:
@@ -80,26 +102,36 @@ def main() -> None:
             d = cx.delete(f"{endpoint}?id=gt.0", headers={**headers, "Prefer": "return=minimal"})
             if d.status_code >= 300:
                 _fatal(f"delete failed [{d.status_code}]: {d.text[:300]}")
+            existing = set()
+        else:
+            # Idempotent: skip questions already stored, so re-runs only fill gaps
+            # (and don't waste the embedding quota re-embedding what's there).
+            g = cx.get(f"{endpoint}?select=question", headers=headers)
+            existing = {(row.get("question") or "").strip() for row in g.json()} if g.status_code < 300 else set()
+            print(f"skip mode: {len(existing)} already present")
+
+        todo = [r for r in rows if r["question"].strip() not in existing]
+        print(f"embedding {len(todo)} new rows (spacing {SLEEP}s to respect free-tier RPM) ...")
 
         batch, done = [], 0
-        for i, r in enumerate(rows, 1):
-            emb = rag.embed(r["question"].strip(), task_type="RETRIEVAL_DOCUMENT")
+        for i, r in enumerate(todo, 1):
+            emb = _embed_retry(r["question"].strip())
             batch.append({
                 "question": r["question"].strip(),
                 "answer": r["answer"].strip(),
                 "category": (r.get("category") or "").strip() or None,
                 "embedding": rag.vec_literal(emb),
             })
-            if len(batch) >= BATCH or i == len(rows):
+            time.sleep(SLEEP)
+            if len(batch) >= BATCH or i == len(todo):
                 resp = cx.post(endpoint, json=batch, headers={**headers, "Prefer": "return=minimal"})
                 if resp.status_code >= 300:
                     _fatal(f"insert failed [{resp.status_code}]: {resp.text[:400]}")
                 done += len(batch)
-                print(f"  uploaded {done}/{len(rows)}")
+                print(f"  uploaded {done}/{len(todo)}")
                 batch = []
-                time.sleep(0.1)  # be gentle on the embedding rate limit
 
-    print(f"done — {done} Q&A embedded ({rag.EMBED_MODEL}) and stored in '{rag.TABLE}'.")
+    print(f"done — {done} new Q&A embedded ({rag.EMBED_MODEL}) and stored in '{rag.TABLE}'.")
 
 
 if __name__ == "__main__":
