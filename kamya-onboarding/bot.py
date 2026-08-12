@@ -636,6 +636,78 @@ async def healthz():
     return {"ok": True}
 
 
+@app.get("/diag")
+async def diag():
+    """Temporary: end-to-end health of LLM, embeddings, and TTS (why Mira is silent)."""
+    import urllib.error
+    import urllib.request
+
+    out = {}
+
+    # 1) Gemini LLM (the words Mira would say)
+    try:
+        import google.genai as genai
+        gc = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        r = await asyncio.to_thread(
+            lambda: gc.models.generate_content(model=model, contents="Reply with the single word OK.")
+        )
+        out["gemini_llm"] = {"ok": True, "model": model, "text": (getattr(r, "text", "") or "")[:60]}
+    except Exception as e:
+        out["gemini_llm"] = {"ok": False, "error": str(e)[:400]}
+
+    # 2) Gemini embeddings (RAG)
+    try:
+        e = await asyncio.to_thread(rag.embed, "test", "RETRIEVAL_QUERY")
+        out["gemini_embed"] = {"ok": True, "dims": len(e)}
+    except Exception as ex:
+        out["gemini_embed"] = {"ok": False, "error": str(ex)[:300]}
+
+    key = os.getenv("ELEVENLABS_API_KEY") or ""
+
+    # 3) ElevenLabs subscription / credits
+    try:
+        req = urllib.request.Request(
+            "https://api.elevenlabs.io/v1/user/subscription", headers={"xi-api-key": key}
+        )
+        with urllib.request.urlopen(req, timeout=15) as rr:
+            sub = json.loads(rr.read())
+        used, lim = sub.get("character_count"), sub.get("character_limit")
+        out["elevenlabs_sub"] = {
+            "ok": True, "status": sub.get("status"), "tier": sub.get("tier"),
+            "used": used, "limit": lim,
+            "remaining": (lim - used) if (lim is not None and used is not None) else None,
+        }
+    except urllib.error.HTTPError as he:
+        out["elevenlabs_sub"] = {"ok": False, "http": he.code, "body": he.read().decode()[:200]}
+    except Exception as ex:
+        out["elevenlabs_sub"] = {"ok": False, "error": str(ex)[:200]}
+
+    # 4) ElevenLabs actual synthesis with the configured voice/model
+    vid = os.getenv("ELEVENLABS_VOICE_ID", "TRnaQb7q41oL7sV0w6Bu")
+    try:
+        body = json.dumps({
+            "text": "namaste",
+            "model_id": os.getenv("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
+        }).encode()
+        req = urllib.request.Request(
+            f"https://api.elevenlabs.io/v1/text-to-speech/{vid}",
+            data=body, headers={"xi-api-key": key, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as rr:
+            audio = rr.read()
+        out["elevenlabs_tts"] = {"ok": True, "voice": vid, "audio_bytes": len(audio)}
+    except urllib.error.HTTPError as he:
+        out["elevenlabs_tts"] = {"ok": False, "voice": vid, "http": he.code, "body": he.read().decode()[:250]}
+    except Exception as ex:
+        out["elevenlabs_tts"] = {"ok": False, "voice": vid, "error": str(ex)[:250]}
+
+    # 5) which engine the bot would pick right now
+    out["tts_engine_setting"] = os.getenv("TTS_ENGINE", "auto").lower()
+    out["elevenlabs_has_credits_fn"] = _elevenlabs_has_credits()
+    return out
+
+
 @app.get("/memory", response_class=HTMLResponse)
 async def memory_view(request: Request):
     """Readable view of a user's long-term memory, open loops, and session
