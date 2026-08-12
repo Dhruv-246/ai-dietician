@@ -54,6 +54,9 @@ try:
         LLMTextFrame,
         TranscriptionFrame,
         TTSStartedFrame,
+        TTSAudioRawFrame,
+        UserStartedSpeakingFrame,
+        BotStoppedSpeakingFrame,
     )
     from pipecat.observers.base_observer import BaseObserver, FramePushed
     from pipecat.pipeline.pipeline import Pipeline
@@ -221,7 +224,7 @@ def build_system_prompt(mode: str, profile: dict | None = None, memory: dict | N
 # A small in-memory ring buffer of call lifecycle events, exposed at /debug so
 # call problems can be diagnosed over HTTP without shell access. Records NO user
 # data (no names, no uids) — only whether they were present.
-_EVENTS: deque = deque(maxlen=80)
+_EVENTS: deque = deque(maxlen=250)
 
 
 def _log(msg: str) -> None:
@@ -301,16 +304,23 @@ class _DiagObserver(BaseObserver):
     async def on_push_frame(self, data: "FramePushed"):
         frame = data.frame
         if isinstance(frame, ErrorFrame):
-            _log(f"ERROR FRAME room={self._room}: {getattr(frame, 'error', frame)}")
+            _log(f"ERROR FRAME: {getattr(frame, 'error', frame)}")
+            return
+        # Count audio frames quietly; log only the first + a running summary.
+        if isinstance(frame, TTSAudioRawFrame):
+            self._audio = getattr(self, "_audio", 0) + 1
+            if self._audio == 1:
+                _log(f"tts audio flowing (sr={getattr(frame,'sample_rate','?')})")
             return
         for cls, label in (
             (LLMFullResponseStartFrame, "llm responding"),
-            (TTSStartedFrame, "tts producing audio"),
-            (BotStartedSpeakingFrame, "bot speaking"),
+            (TTSStartedFrame, "tts started"),
+            (BotStartedSpeakingFrame, "BOT speaking START"),
+            (BotStoppedSpeakingFrame, f"BOT speaking STOP audio_frames={getattr(self,'_audio',0)}"),
+            (UserStartedSpeakingFrame, "USER started speaking (may interrupt)"),
         ):
-            if isinstance(frame, cls) and label not in self._seen:
-                self._seen.add(label)
-                _log(f"{label} room={self._room}")
+            if isinstance(frame, cls):
+                _log(label)
                 break
 
 
@@ -733,6 +743,12 @@ async def avatar():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+@app.get("/events")
+async def events():
+    """Temporary: last pipeline events (to see where audio dies)."""
+    return {"events": list(_EVENTS)}
 
 
 
