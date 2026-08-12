@@ -436,14 +436,18 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         settings=GoogleLLMService.Settings(model=gemini_model),
     )
 
-    # TTS with automatic fallback (both get the sanitizer so only Hindi/English
-    # is ever spoken):
-    #  - PREFER ElevenLabs (eleven_flash_v2_5) — best natural English + names —
-    #    whenever the account has credits.
-    #  - FALL BACK to Sarvam bulbul (free, Hindi-first, English slightly accented)
-    #    when ElevenLabs is out of monthly credits / key missing, so Mira never
-    #    goes silent. Checked once at call start, off the audio path.
-    if await asyncio.to_thread(_elevenlabs_has_credits):
+    # TTS engine selection. TTS_ENGINE env: "auto" (default) uses ElevenLabs when
+    # it has credits else Sarvam; "sarvam" forces Sarvam bulbul (native Indian
+    # accent — most natural for Hinglish); "elevenlabs" forces ElevenLabs.
+    # Both engines get the sanitizer so only Hindi/English is ever spoken.
+    _tts_engine = os.getenv("TTS_ENGINE", "auto").strip().lower()
+    if _tts_engine == "sarvam":
+        use_eleven = False
+    elif _tts_engine == "elevenlabs":
+        use_eleven = True
+    else:  # auto
+        use_eleven = await asyncio.to_thread(_elevenlabs_has_credits)
+    if use_eleven:
         _log(f"tts=elevenlabs room={room_name}")
         tts = ElevenLabsTTSService(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
@@ -630,6 +634,37 @@ async def avatar():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+
+@app.get("/el-voices")
+async def el_voices():
+    """Temporary: list ElevenLabs voices available to this key, highlighting any
+    Indian/Hindi ones (so we can pick a natural Hinglish voice)."""
+    import urllib.request
+    key = os.getenv("ELEVENLABS_API_KEY") or ""
+    req = urllib.request.Request(
+        "https://api.elevenlabs.io/v2/voices?page_size=100",
+        headers={"xi-api-key": key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read())
+        out = []
+        for v in data.get("voices", []):
+            labels = v.get("labels") or {}
+            blob = " ".join(str(x).lower() for x in labels.values())
+            name = (v.get("name") or "").lower()
+            indian = ("india" in blob or "hindi" in blob or "india" in name or "hindi" in name)
+            out.append({
+                "voice_id": v.get("voice_id"),
+                "name": v.get("name"),
+                "labels": labels,
+                "indianish": indian,
+            })
+        out.sort(key=lambda x: not x["indianish"])
+        return {"count": len(out), "voices": out}
+    except Exception as exc:
+        return {"error": str(exc)[:300]}
 
 
 @app.get("/memory", response_class=HTMLResponse)
