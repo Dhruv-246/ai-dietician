@@ -729,6 +729,45 @@ async def healthz():
     return {"ok": True}
 
 
+@app.get("/diag-tts")
+async def diag_tts():
+    """Temporary: run Gemini TTS streaming from THIS server (Railway's key) to see
+    why audio isn't reaching the call — quota/error/empty."""
+    import time
+    from google import genai
+    from google.genai import types
+
+    model = os.getenv("GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview")
+    voice = os.getenv("GEMINI_TTS_VOICE", "Kore")
+    out = {"model": model, "voice": voice, "tts_engine": os.getenv("TTS_ENGINE", "gemini")}
+    try:
+        c = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        cfg = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice))),
+        )
+        t0 = time.time()
+        first = None
+        total = 0
+        chunks = 0
+        resp = await c.aio.models.generate_content_stream(
+            model=model, contents="नमस्ते! Main Mira hoon.", config=cfg
+        )
+        async for chunk in resp:
+            if chunk.candidates and chunk.candidates[0].content and chunk.candidates[0].content.parts:
+                for p in chunk.candidates[0].content.parts:
+                    if p.inline_data and p.inline_data.data:
+                        if first is None:
+                            first = round(time.time() - t0, 2)
+                        total += len(p.inline_data.data)
+                        chunks += 1
+        out.update({"ok": total > 0, "ttfb_s": first, "chunks": chunks, "audio_bytes": total})
+    except Exception as exc:
+        out.update({"ok": False, "error": str(exc)[:400]})
+    return out
+
+
 
 
 @app.get("/memory", response_class=HTMLResponse)
