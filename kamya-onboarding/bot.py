@@ -72,7 +72,9 @@ try:
     from pipecat.services.google.tts import GeminiTTSService
     from pipecat.services.sarvam.tts import SarvamTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
+    from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
     from pipecat.services.google.llm import GoogleLLMService
+    from pipecat.services.deepseek.llm import DeepSeekLLMService
     from pipecat.transcriptions.language import Language
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.runner.livekit import generate_token, generate_token_with_agent
@@ -407,35 +409,62 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         ),
     )
 
-    # STT: Sarvam Saarika. Default to AUTO-DETECT ("unknown"), which returns
-    # code-mixed Hinglish — Hindi words in Devanagari, English words kept in
-    # Latin (e.g. "protein", "gym"). Forcing hi-IN (the old setting) transliterated
-    # every English word into Devanagari, which we don't want. Auto-detect is why
-    # we'd previously seen occasional Punjabi/Gurmukhi mis-reads; if that comes
-    # back, set STT_LANGUAGE=hi-IN to force full Devanagari again.
-    stt_kwargs = dict(model=os.getenv("STT_MODEL", "saarika:v2.5"))
-    _stt_lang = os.getenv("STT_LANGUAGE", "auto").strip().lower()
-    if _stt_lang in ("hi", "hi-in", "hindi"):
-        stt_kwargs["language"] = Language.HI_IN
-        _log("stt language=hi-IN (forced Devanagari)")
+    # STT engine. STT_ENGINE env:
+    #  - "deepgram" (DEFAULT): Deepgram Flux multilingual (flux-general-multi) with
+    #    Hindi+English hints, and built-in end-of-turn detection.
+    #  - "sarvam": Sarvam Saarika (auto-detect = code-mixed Hinglish; best Hindi).
+    # Falls back to Sarvam if DEEPGRAM_API_KEY is missing, so the bot never fails
+    # to start. (Sarvam auto-detect keeps English in Latin, Hindi in Devanagari;
+    # STT_LANGUAGE=hi-IN forces full Devanagari.)
+    _stt_engine = os.getenv("STT_ENGINE", "deepgram").strip().lower()
+    if _stt_engine == "deepgram" and os.getenv("DEEPGRAM_API_KEY"):
+        dg_model = os.getenv("DEEPGRAM_STT_MODEL", "flux-general-multi")
+        _log(f"stt=deepgram-flux model={dg_model} hints=hi,en room={room_name}")
+        stt = DeepgramFluxSTTService(
+            api_key=os.getenv("DEEPGRAM_API_KEY"),
+            settings=DeepgramFluxSTTService.Settings(
+                model=dg_model,
+                language_hints=[Language.HI, Language.EN],
+            ),
+        )
     else:
-        _log("stt language=auto (code-mixed Hinglish)")
-    stt = SarvamSTTService(
-        api_key=os.getenv("SARVAM_API_KEY"),
-        settings=SarvamSTTService.Settings(**stt_kwargs),
-    )
+        if _stt_engine == "deepgram":
+            _log(f"stt=sarvam (DEEPGRAM_API_KEY missing) room={room_name}")
+        stt_kwargs = dict(model=os.getenv("STT_MODEL", "saarika:v2.5"))
+        _stt_lang = os.getenv("STT_LANGUAGE", "auto").strip().lower()
+        if _stt_lang in ("hi", "hi-in", "hindi"):
+            stt_kwargs["language"] = Language.HI_IN
+            _log(f"stt=sarvam language=hi-IN room={room_name}")
+        else:
+            _log(f"stt=sarvam language=auto room={room_name}")
+        stt = SarvamSTTService(
+            api_key=os.getenv("SARVAM_API_KEY"),
+            settings=SarvamSTTService.Settings(**stt_kwargs),
+        )
 
-    # LLM for Mira's responses: Gemini 3.5 Flash — strong, natural Hinglish and
-    # good instruction-following (a quality upgrade over Llama-70B). Override
-    # with GEMINI_MODEL (e.g. gemini-3.6-flash for the newest, or gemini-2.5-flash).
-    # (Groq is still used, but ONLY for the cheap background memory consolidation
-    # in consolidate.py — not for live responses.)
-    gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-    _log(f"llm gemini model={gemini_model}")
-    llm = GoogleLLMService(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        settings=GoogleLLMService.Settings(model=gemini_model),
-    )
+    # LLM engine. LLM_ENGINE env:
+    #  - "deepseek" (DEFAULT): DeepSeek (deepseek-reasoner — a THINKING model;
+    #    smarter but higher latency on voice; its hidden reasoning is not spoken).
+    #  - "gemini": Gemini (GEMINI_MODEL, default gemini-3.5-flash) — faster.
+    # Falls back to Gemini if DEEPSEEK_API_KEY is missing so the bot never fails.
+    # (Groq is still used only for background memory consolidation in consolidate.py.)
+    _llm_engine = os.getenv("LLM_ENGINE", "deepseek").strip().lower()
+    if _llm_engine == "deepseek" and os.getenv("DEEPSEEK_API_KEY"):
+        deepseek_model = os.getenv("DEEPSEEK_MODEL", "deepseek-reasoner")
+        _log(f"llm=deepseek model={deepseek_model} room={room_name}")
+        llm = DeepSeekLLMService(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            settings=DeepSeekLLMService.Settings(model=deepseek_model),
+        )
+    else:
+        if _llm_engine == "deepseek":
+            _log(f"llm=gemini (DEEPSEEK_API_KEY missing) room={room_name}")
+        gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+        _log(f"llm=gemini model={gemini_model} room={room_name}")
+        llm = GoogleLLMService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            settings=GoogleLLMService.Settings(model=gemini_model),
+        )
 
     # TTS engine selection. TTS_ENGINE env:
     #  - "gemini" (DEFAULT): Gemini TTS (gemini-3.1-flash-tts-preview) via the
