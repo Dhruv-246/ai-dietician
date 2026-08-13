@@ -537,10 +537,16 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         tts_filters = [ScriptTextFilter()]
         if gemini_style.strip():
             tts_filters.append(StylePrefixTextFilter(gemini_style))
+        # TTS can use a SEPARATE Gemini key (GEMINI_TTS_API_KEY) so a second
+        # Google account's free quota powers speech while the main GOOGLE_API_KEY
+        # (used for RAG embeddings) stays on the primary account. Falls back to
+        # GOOGLE_API_KEY when GEMINI_TTS_API_KEY isn't set.
+        gemini_tts_key = os.getenv("GEMINI_TTS_API_KEY") or os.getenv("GOOGLE_API_KEY")
         _log(f"tts=gemini model={gemini_tts_model} voice={os.getenv('GEMINI_TTS_VOICE', 'Kore')} "
-             f"style={'on' if gemini_style.strip() else 'off'} room={room_name}")
+             f"style={'on' if gemini_style.strip() else 'off'} "
+             f"key={'separate' if os.getenv('GEMINI_TTS_API_KEY') else 'shared'} room={room_name}")
         tts = GeminiTTSService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
+            api_key=gemini_tts_key,
             use_genai=True,  # use the Gemini API key path (not GCP creds)
             sample_rate=24000,  # Gemini TTS outputs 24kHz PCM; pin it so LiveKit
                                 # resamples correctly (mislabeled rate = silence/garble)
