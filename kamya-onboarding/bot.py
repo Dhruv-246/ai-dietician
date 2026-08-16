@@ -73,6 +73,7 @@ try:
     from pipecat.utils.text.base_text_filter import BaseTextFilter
     from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
     from pipecat.services.google.tts import GeminiTTSService
+    from pipecat.services.cartesia.tts import CartesiaTTSService
     from pipecat.services.sarvam.tts import SarvamTTSService
     from pipecat.services.sarvam.stt import SarvamSTTService
     from pipecat.services.deepgram.flux.stt import DeepgramFluxSTTService
@@ -94,6 +95,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 import consolidate
 import memory_store
+import onboarding_nodes
 import rag
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
@@ -163,27 +165,174 @@ def _build_user_context(profile: dict, memory: dict) -> str:
     ltm = memory.get("long_term_memory") or {}
     lines = []
 
+    # --- Onboarding profile (manual form data) ---
     prof_bits = [f"{k.capitalize()}: {profile[k]}" for k in _PROFILE_FIELDS
                  if str(profile.get(k, "")).strip()]
     if prof_bits:
         lines.append("Profile — " + " | ".join(prof_bits))
 
-    for label, key in (("Goals", "goals"), ("Preferences", "preferences"),
-                       ("Dislikes", "dislikes"), ("Known facts", "facts")):
-        vals = ltm.get(key) or []
-        if vals:
-            lines.append(f"{label}: " + "; ".join(str(v) for v in vals))
+    # --- Backward compat: detect old flat format ---
+    _has_new = any(isinstance(ltm.get(k), dict) for k in
+                   ("identity", "health", "diet", "preferences", "goals",
+                    "lifestyle", "progress", "current_pattern"))
+    if not _has_new:
+        for label, key in (("Goals", "goals"), ("Preferences", "preferences"),
+                           ("Dislikes", "dislikes"), ("Known facts", "facts")):
+            vals = ltm.get(key) or []
+            if vals:
+                lines.append(f"{label}: " + "; ".join(str(v) for v in vals))
+        open_loops = memory.get("open_loops") or []
+        if open_loops:
+            lines.append("Open loops: " + "; ".join(str(v) for v in open_loops))
+        return "\n".join(f"- {ln}" for ln in lines) if lines else "- (No prior context yet.)"
 
+    # --- Identity ---
+    identity = ltm.get("identity") or {}
+    basics = identity.get("basics") or {}
+    body = identity.get("body") or {}
+    id_bits = [f"{k}: {v}" for k, v in basics.items() if v]
+    id_bits += [f"{k}: {v}" for k, v in body.items() if v]
+    if id_bits:
+        lines.append("Identity — " + " | ".join(id_bits))
+
+    # --- Health (safety-critical, marked with ⚠) ---
+    health = ltm.get("health") or {}
+    for label, key in (("Conditions", "conditions"),
+                       ("Allergies", "allergies")):
+        vals = health.get(key) or []
+        if vals:
+            lines.append(f"⚠ {label}: " + "; ".join(str(v) for v in vals))
+    meds = health.get("medications") or []
+    if meds:
+        med_strs = []
+        for m in meds:
+            if isinstance(m, dict):
+                parts = [m.get("name", "")]
+                if m.get("dosage"):
+                    parts.append(m["dosage"])
+                if m.get("timing"):
+                    parts.append(m["timing"])
+                if m.get("frequency"):
+                    parts.append(m["frequency"])
+                med_strs.append(" ".join(p for p in parts if p))
+            else:
+                med_strs.append(str(m))
+        lines.append("⚠ Medications: " + "; ".join(med_strs))
+
+    # --- Diet type & restrictions ---
+    diet = ltm.get("diet") or {}
+    if diet.get("type"):
+        lines.append(f"Diet type: {diet['type']}")
+    if diet.get("restrictions"):
+        lines.append("Restrictions: " + "; ".join(str(v) for v in diet["restrictions"]))
+
+    # --- Current eating pattern (per meal slot) ---
+    pattern = ltm.get("current_pattern") or {}
+    _SLOT_LABELS = {
+        "morning": "Morning", "mid_morning": "Mid-morning", "lunch": "Lunch",
+        "evening": "Evening", "dinner": "Dinner", "late_night": "Late night",
+    }
+    pattern_lines = []
+    gap_lines = []
+    for slot_key, slot_label in _SLOT_LABELS.items():
+        slot = pattern.get(slot_key) or {}
+        if not isinstance(slot, dict):
+            continue
+        parts = []
+        if slot.get("time"):
+            parts.append(f"~{slot['time']}")
+        freq = slot.get("frequent") or []
+        if freq:
+            parts.append(", ".join(str(f) for f in freq))
+        if slot.get("note"):
+            parts.append(f"({slot['note']})")
+        if parts:
+            pattern_lines.append(f"  {slot_label}: " + " — ".join(parts))
+        gaps = slot.get("gaps") or []
+        for g in gaps:
+            gap_lines.append(f"  {slot_label}: {g}")
+    if pattern_lines:
+        lines.append("Current eating pattern:")
+        lines.extend(pattern_lines)
+    if gap_lines:
+        lines.append("Gaps to fill (ask naturally when relevant, don't interrogate):")
+        lines.extend(gap_lines)
+
+    # --- Preferences ---
+    prefs = ltm.get("preferences") or {}
+    if prefs.get("likes"):
+        lines.append("Likes: " + "; ".join(str(v) for v in prefs["likes"]))
+    if prefs.get("dislikes"):
+        lines.append("Dislikes (NEVER suggest these): " + "; ".join(str(v) for v in prefs["dislikes"]))
+    if prefs.get("cuisine"):
+        lines.append(f"Cuisine: {prefs['cuisine']}")
+
+    # --- Goals ---
+    goals = ltm.get("goals") or {}
+    goal_bits = []
+    if goals.get("primary_goal"):
+        goal_bits.append(goals["primary_goal"])
+    if goals.get("target"):
+        goal_bits.append(f"target: {goals['target']}")
+    if goals.get("motivation"):
+        goal_bits.append(f"why: {goals['motivation']}")
+    if goal_bits:
+        lines.append("Goals: " + " | ".join(goal_bits))
+
+    # --- Lifestyle ---
+    lifestyle = ltm.get("lifestyle") or {}
+    life_bits = [f"{k}: {v}" for k, v in lifestyle.items() if v]
+    if life_bits:
+        lines.append("Lifestyle — " + " | ".join(life_bits))
+
+    # --- Progress ---
+    progress = ltm.get("progress") or {}
+    if progress.get("what_worked"):
+        lines.append("What worked: " + "; ".join(str(v) for v in progress["what_worked"]))
+    if progress.get("what_failed"):
+        lines.append("What failed (don't repeat these): " + "; ".join(str(v) for v in progress["what_failed"]))
+    if progress.get("struggles"):
+        lines.append("Ongoing struggles: " + "; ".join(str(v) for v in progress["struggles"]))
+
+    # --- Entities (active advice/plans Mira has given) ---
+    entities = ltm.get("entities") or []
+    if entities:
+        lines.append("Active advice/plans you gave this user:")
+        for e in entities:
+            if isinstance(e, dict):
+                status = e.get("status", "")
+                what = e.get("what", "")
+                given = e.get("given_on", "")
+                lines.append(f"  - {what} (status: {status}, given: {given})")
+            else:
+                lines.append(f"  - {e}")
+
+    # --- Recent exchanges (conversational continuity) ---
+    recent = ltm.get("recent_exchanges") or []
+    if recent:
+        lines.append("Last conversation highlights:")
+        for ex in recent[-6:]:
+            if isinstance(ex, dict):
+                role = "User" if ex.get("role") == "user" else "You"
+                lines.append(f'  {role}: "{ex.get("text", "")}"')
+
+    # --- Misc ---
+    misc = ltm.get("misc") or []
+    if misc:
+        lines.append("Other notes: " + "; ".join(str(v) for v in misc))
+
+    # --- Open loops ---
     open_loops = memory.get("open_loops") or []
     if open_loops:
         lines.append("Open loops (gently follow up on ONE if it fits — do not interrogate): "
                      + "; ".join(str(v) for v in open_loops))
 
-    # Continuity signals
-    count = int(memory.get("session_count") or 0)
+    # --- Continuity signals ---
+    meta = ltm.get("interaction_meta") or {}
+    count = int(meta.get("total_sessions") or memory.get("session_count") or 0)
     if count > 0:
         cont = f"This is check-in #{count + 1}."
-        last_at = str(memory.get("last_session_at") or "").strip()
+        last_at = str(meta.get("last_session") or memory.get("last_session_at") or "").strip()
         if last_at:
             try:
                 delta = datetime.now(timezone.utc) - datetime.fromisoformat(last_at)
@@ -191,6 +340,9 @@ def _build_user_context(profile: dict, memory: dict) -> str:
                 cont += f" Last call was {'today' if days == 0 else f'{days} day(s) ago'}."
             except Exception:
                 pass
+        mood = meta.get("mood_last_call")
+        if mood:
+            cont += f" Mood last time: {mood}."
         last_sum = str(memory.get("last_session_summary") or "").strip()
         if last_sum:
             cont += f' Last time: "{last_sum}"'
@@ -416,9 +568,11 @@ class RAGProcessor(FrameProcessor):
 # --------------------------------------------------------------------------- #
 async def run_livekit_bot(room_name: str, system_prompt: str, *,
                           firebase_uid=None, user_id="", run_id="",
-                          mode="onboarding", existing_memory=None, existing_open_loops=None):
+                          mode="onboarding", existing_memory=None, existing_open_loops=None,
+                          profile=None):
     """Join `room_name` as Mira, run the conversation, then consolidate memory."""
     _log(f"bot starting room={room_name} mode={mode} prompt_chars={len(system_prompt)}")
+    _onboarding_profile = profile or {}
     url = os.getenv("LIVEKIT_URL")
     key = os.getenv("LIVEKIT_API_KEY")
     secret = os.getenv("LIVEKIT_API_SECRET")
@@ -513,43 +667,44 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         )
 
     # TTS engine selection. TTS_ENGINE env:
-    #  - "gemini" (DEFAULT): Gemini TTS (gemini-3.1-flash-tts-preview) via the
-    #    GenAI backend — uses the existing GOOGLE_API_KEY (no GCP service account).
-    #    ONE voice speaks both Hindi and English, so the accent stays consistent
-    #    (fixes the "accent keeps changing / not humanized" issue). NOTE: it's a
-    #    preview model with free-tier quota — if it runs out, set TTS_ENGINE=sarvam.
+    #  - "cartesia" (DEFAULT): Cartesia Sonic 3.5 — 42 languages incl. Hindi,
+    #    native Hinglish voice, WebSocket streaming. Needs CARTESIA_API_KEY.
+    #  - "gemini": Gemini TTS — quota-limited preview model.
     #  - "sarvam": Sarvam bulbul — native Indian accent, free, very reliable.
     #  - "elevenlabs": ElevenLabs (Indian "Simran" voice needs a PAID plan/owned voice).
     #  - "auto": ElevenLabs when it has credits, else Sarvam.
-    # All engines get the sanitizer so only Hindi/English is ever spoken.
-    _tts_engine = os.getenv("TTS_ENGINE", "gemini").strip().lower()
+    _tts_engine = os.getenv("TTS_ENGINE", "cartesia").strip().lower()
     if _tts_engine == "auto":
         _tts_engine = "elevenlabs" if await asyncio.to_thread(_elevenlabs_has_credits) else "sarvam"
 
-    if _tts_engine == "gemini":
+    if _tts_engine == "cartesia":
+        cartesia_voice = os.getenv("CARTESIA_VOICE_ID", "95d51f79-c397-46f9-b49a-23763d3eaa2d")
+        cartesia_model = os.getenv("CARTESIA_MODEL", "sonic-3.5")
+        _log(f"tts=cartesia model={cartesia_model} voice={cartesia_voice} room={room_name}")
+        tts = CartesiaTTSService(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            voice_id=cartesia_voice,
+            model=cartesia_model,
+            sample_rate=16000,
+            text_filters=[ScriptTextFilter()],
+            params=CartesiaTTSService.InputParams(
+                language=Language.HI,
+            ),
+        )
+    elif _tts_engine == "gemini":
         gemini_tts_model = os.getenv("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts")
-        # Style control: the API-key backend ignores the `prompt` Setting, but it
-        # honours a style directive prepended to the text (and does NOT speak it).
-        # StylePrefixTextFilter injects GEMINI_TTS_STYLE for consistent delivery.
-        # Default = casual/upbeat Indian (the sample the user picked). Set the env
-        # to "" to disable, or to any instruction to change Mira's vocal style.
-        gemini_style = os.getenv("GEMINI_TTS_STYLE", "")  # off by default — normal delivery
+        gemini_style = os.getenv("GEMINI_TTS_STYLE", "")
         tts_filters = [ScriptTextFilter()]
         if gemini_style.strip():
             tts_filters.append(StylePrefixTextFilter(gemini_style))
-        # TTS can use a SEPARATE Gemini key (GEMINI_TTS_API_KEY) so a second
-        # Google account's free quota powers speech while the main GOOGLE_API_KEY
-        # (used for RAG embeddings) stays on the primary account. Falls back to
-        # GOOGLE_API_KEY when GEMINI_TTS_API_KEY isn't set.
         gemini_tts_key = os.getenv("GEMINI_TTS_API_KEY") or os.getenv("GOOGLE_API_KEY")
         _log(f"tts=gemini model={gemini_tts_model} voice={os.getenv('GEMINI_TTS_VOICE', 'Kore')} "
              f"style={'on' if gemini_style.strip() else 'off'} "
              f"key={'separate' if os.getenv('GEMINI_TTS_API_KEY') else 'shared'} room={room_name}")
         tts = GeminiTTSService(
             api_key=gemini_tts_key,
-            use_genai=True,  # use the Gemini API key path (not GCP creds)
-            sample_rate=24000,  # Gemini TTS outputs 24kHz PCM; pin it so LiveKit
-                                # resamples correctly (mislabeled rate = silence/garble)
+            use_genai=True,
+            sample_rate=24000,
             text_filters=tts_filters,
             settings=GeminiTTSService.Settings(
                 model=gemini_tts_model,
@@ -614,15 +769,20 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
             ),
         )
 
-    # RAG: if a knowledge base is configured, retrieve reference Q&A per user
-    # turn and fold them into the system prompt (RAGProcessor). Off by default
-    # when SUPABASE_URL/KEY or GOOGLE_API_KEY are absent — Mira just answers
-    # from her own knowledge + the user's memory.
+    # Pipeline mid-section: onboarding uses NodeProcessor (state machine);
+    # ongoing uses RAGProcessor (knowledge base retrieval).
     stages = [
         transport.input(),            # mic in (from LiveKit)
         stt,                          # speech -> text
     ]
-    if rag.enabled():
+    if mode == "onboarding":
+        # Onboarding: node-based state machine controls the call flow.
+        # Each node has its own focused prompt; code drives transitions.
+        # No RAG needed during onboarding — Mira is collecting info, not advising.
+        node_proc = onboarding_nodes.create_node_processor(context, _onboarding_profile, log_fn=_log)
+        _log(f"onboarding node system enabled room={room_name}")
+        stages.append(node_proc)
+    elif rag.enabled():
         _log(f"rag enabled room={room_name} top_k={os.getenv('RAG_TOP_K', '3')}")
         stages.append(RAGProcessor(
             context,
@@ -788,11 +948,208 @@ async def memory_view(request: Request):
             return "<p class='empty'>— nothing yet —</p>"
         return "<ul>" + "".join(f"<li>{esc(i)}</li>" for i in items) + "</ul>"
 
-    ltm_html = "".join(
-        f"<h3>{lbl}</h3>{ul(ltm.get(k))}"
-        for lbl, k in (("Facts", "facts"), ("Goals", "goals"),
-                       ("Preferences", "preferences"), ("Dislikes", "dislikes"))
-    )
+    def kv_table(obj, highlight_keys=None):
+        """Render a dict as a compact key-value list."""
+        if not obj or not isinstance(obj, dict):
+            return "<p class='empty'>— nothing yet —</p>"
+        highlight_keys = highlight_keys or set()
+        rows = []
+        for k, v in obj.items():
+            if v is None or v == [] or v == "":
+                continue
+            label = k.replace("_", " ").capitalize()
+            cls = " class='warn'" if k in highlight_keys else ""
+            if isinstance(v, list):
+                val = esc("; ".join(str(i) for i in v))
+            else:
+                val = esc(str(v))
+            rows.append(f"<li{cls}><strong>{esc(label)}:</strong> {val}</li>")
+        return f"<ul>{''.join(rows)}</ul>" if rows else "<p class='empty'>— nothing yet —</p>"
+
+    def med_list(meds):
+        if not meds:
+            return "<p class='empty'>— none —</p>"
+        items = []
+        for m in meds:
+            if isinstance(m, dict):
+                parts = [m.get("name", "?")]
+                if m.get("dosage"):
+                    parts.append(m["dosage"])
+                if m.get("timing"):
+                    parts.append(m["timing"])
+                if m.get("frequency"):
+                    parts.append(f"({m['frequency']})")
+                items.append(" ".join(p for p in parts if p))
+            else:
+                items.append(str(m))
+        return "<ul>" + "".join(f"<li>{esc(i)}</li>" for i in items) + "</ul>"
+
+    def pattern_html(pattern):
+        if not pattern or not isinstance(pattern, dict):
+            return "<p class='empty'>— not tracked yet —</p>"
+        slot_labels = {"morning": "Morning", "mid_morning": "Mid-morning",
+                       "lunch": "Lunch", "evening": "Evening",
+                       "dinner": "Dinner", "late_night": "Late night"}
+        rows = []
+        for slot_key, slot_label in slot_labels.items():
+            slot = pattern.get(slot_key) or {}
+            if not isinstance(slot, dict):
+                continue
+            time_str = esc(slot.get("time") or "—")
+            freq = slot.get("frequent") or []
+            freq_str = esc(", ".join(str(f) for f in freq)) if freq else "<span class='empty'>?</span>"
+            note = esc(slot.get("note") or "")
+            gaps = slot.get("gaps") or []
+            gaps_str = "; ".join(esc(str(g)) for g in gaps) if gaps else ""
+            rows.append(
+                f"<tr><td class='slot-label'>{esc(slot_label)}</td>"
+                f"<td>{time_str}</td>"
+                f"<td>{freq_str}</td>"
+                f"<td class='note'>{note}</td>"
+                f"<td class='gaps'>{gaps_str}</td></tr>"
+            )
+        if not rows:
+            return "<p class='empty'>— not tracked yet —</p>"
+        return (
+            "<div class='table-scroll'><table class='pattern'>"
+            "<thead><tr><th>Meal</th><th>Time</th><th>Frequent foods</th><th>Note</th><th>Gaps</th></tr></thead>"
+            "<tbody>" + "".join(rows) + "</tbody></table></div>"
+        )
+
+    def entities_html(entities):
+        if not entities:
+            return "<p class='empty'>— no active advice tracked —</p>"
+        items = []
+        for e in entities:
+            if isinstance(e, dict):
+                status_cls = "pill-green" if e.get("status") in ("following", "liked") else \
+                             "pill-red" if e.get("status") in ("quit",) else "pill"
+                items.append(
+                    f"<div class='entity'>"
+                    f"<span class='pill {status_cls}'>{esc(e.get('type', ''))}</span> "
+                    f"<strong>{esc(e.get('what', ''))}</strong>"
+                    f"<span class='entity-meta'>status: {esc(e.get('status', '?'))} · "
+                    f"given: {esc(e.get('given_on', '?'))}</span></div>"
+                )
+            else:
+                items.append(f"<div class='entity'>{esc(str(e))}</div>")
+        return "".join(items)
+
+    def exchanges_html(exchanges):
+        if not exchanges:
+            return "<p class='empty'>— no recent exchanges —</p>"
+        items = []
+        for ex in exchanges[-6:]:
+            if isinstance(ex, dict):
+                role = "user" if ex.get("role") == "user" else "mira"
+                items.append(f"<div class='exchange {role}'>"
+                             f"<span class='role'>{esc(role.capitalize())}</span> "
+                             f"{esc(ex.get('text', ''))}</div>")
+        return "".join(items) if items else "<p class='empty'>— none —</p>"
+
+    # --- Build LTM HTML sections ---
+    identity = ltm.get("identity") or {}
+    health = ltm.get("health") or {}
+    diet = ltm.get("diet") or {}
+    prefs = ltm.get("preferences") or {}
+    goals_d = ltm.get("goals") or {}
+    lifestyle_d = ltm.get("lifestyle") or {}
+    progress_d = ltm.get("progress") or {}
+    meta_d = ltm.get("interaction_meta") or {}
+
+    ltm_html = ""
+
+    # Identity
+    basics = identity.get("basics") or {}
+    body = identity.get("body") or {}
+    id_merged = {**basics, **body}
+    if any(v for v in id_merged.values()):
+        ltm_html += f"<h3>Identity</h3>{kv_table(id_merged)}"
+
+    # Health
+    health_items = []
+    for label, key in (("Conditions", "conditions"), ("Allergies", "allergies")):
+        vals = health.get(key) or []
+        if vals:
+            health_items.append(f"<li class='warn'><strong>{label}:</strong> {esc('; '.join(str(v) for v in vals))}</li>")
+    meds = health.get("medications") or []
+    if health_items or meds:
+        ltm_html += "<h3>Health</h3>"
+        if health_items:
+            ltm_html += "<ul>" + "".join(health_items) + "</ul>"
+        if meds:
+            ltm_html += "<h4>Medications</h4>" + med_list(meds)
+
+    # Diet
+    diet_items = {}
+    if diet.get("type"):
+        diet_items["type"] = diet["type"]
+    if diet.get("restrictions"):
+        diet_items["restrictions"] = diet["restrictions"]
+    if diet_items:
+        ltm_html += f"<h3>Diet</h3>{kv_table(diet_items)}"
+
+    # Current pattern
+    cp = ltm.get("current_pattern") or {}
+    if cp:
+        ltm_html += f"<h3>Eating Pattern</h3>{pattern_html(cp)}"
+
+    # Preferences
+    pref_items = {}
+    if prefs.get("likes"):
+        pref_items["likes"] = prefs["likes"]
+    if prefs.get("dislikes"):
+        pref_items["dislikes"] = prefs["dislikes"]
+    if prefs.get("cuisine"):
+        pref_items["cuisine"] = prefs["cuisine"]
+    if pref_items:
+        ltm_html += f"<h3>Preferences</h3>{kv_table(pref_items, highlight_keys={{'dislikes'}})}"
+
+    # Goals
+    if any(goals_d.get(k) for k in ("primary_goal", "target", "motivation")):
+        ltm_html += f"<h3>Goals</h3>{kv_table(goals_d)}"
+
+    # Lifestyle
+    if any(v for v in lifestyle_d.values() if v):
+        ltm_html += f"<h3>Lifestyle</h3>{kv_table(lifestyle_d)}"
+
+    # Progress
+    prog_items = {}
+    if progress_d.get("what_worked"):
+        prog_items["what_worked"] = progress_d["what_worked"]
+    if progress_d.get("what_failed"):
+        prog_items["what_failed"] = progress_d["what_failed"]
+    if progress_d.get("struggles"):
+        prog_items["struggles"] = progress_d["struggles"]
+    if prog_items:
+        ltm_html += f"<h3>Progress</h3>{kv_table(prog_items, highlight_keys={{'what_failed', 'struggles'}})}"
+
+    # Entities
+    ents = ltm.get("entities") or []
+    if ents:
+        ltm_html += f"<h3>Active Advice & Plans</h3>{entities_html(ents)}"
+
+    # Recent exchanges
+    recent = ltm.get("recent_exchanges") or []
+    if recent:
+        ltm_html += f"<h3>Last Conversation</h3>{exchanges_html(recent)}"
+
+    # Interaction meta
+    if any(v for v in meta_d.values() if v):
+        ltm_html += f"<h3>Interaction History</h3>{kv_table(meta_d)}"
+
+    # Misc
+    misc_items = ltm.get("misc") or []
+    if misc_items:
+        ltm_html += f"<h3>Other Notes</h3>{ul(misc_items)}"
+
+    if not ltm_html:
+        # Fallback for old flat format
+        ltm_html = "".join(
+            f"<h3>{lbl}</h3>{ul(ltm.get(k))}"
+            for lbl, k in (("Facts", "facts"), ("Goals", "goals"),
+                           ("Preferences", "preferences"), ("Dislikes", "dislikes"))
+        )
 
     sess_html = ""
     for s in sessions:
@@ -844,6 +1201,24 @@ async def memory_view(request: Request):
   details.promptbox[open]>summary::after{{content:" ▾ tap to collapse";font-size:12px;font-weight:600;color:var(--muted);}}
   details.promptbox pre{{margin:12px 0 0;white-space:pre-wrap;word-wrap:break-word;font-family:ui-monospace,Menlo,monospace;
     font-size:12.5px;line-height:1.55;color:var(--ink);max-height:55vh;overflow:auto;background:#f7faff;border:1px solid var(--line);border-radius:10px;padding:14px;}}
+  h4{{font-size:13px;color:var(--muted);margin:8px 0 4px;}}
+  .warn{{color:#b44;font-weight:600;}}
+  .table-scroll{{overflow-x:auto;margin:8px 0;}}
+  table.pattern{{width:100%;border-collapse:collapse;font-size:13px;}}
+  table.pattern th{{text-align:left;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding:6px 10px;border-bottom:2px solid var(--line);}}
+  table.pattern td{{padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top;}}
+  table.pattern .slot-label{{font-weight:600;white-space:nowrap;}}
+  table.pattern .note{{color:var(--muted);font-style:italic;font-size:12px;}}
+  table.pattern .gaps{{color:#b44;font-size:12px;}}
+  .entity{{padding:8px 0;border-bottom:1px solid var(--line);}}
+  .entity:last-child{{border-bottom:none;}}
+  .entity-meta{{display:block;font-size:11.5px;color:var(--muted);margin-top:2px;}}
+  .pill-green{{background:rgba(34,139,34,.12);color:#1a6b1a;}}
+  .pill-red{{background:rgba(180,40,40,.1);color:#a22;}}
+  .exchange{{padding:5px 0;font-size:13.5px;}}
+  .exchange .role{{font-weight:700;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-right:6px;}}
+  .exchange.user .role{{color:var(--accent-fg);}}
+  .exchange.mira .role{{color:#1a6b1a;}}
 </style></head><body>
 <div class="wrap">
   <span class="eyebrow">Mira's memory</span>
@@ -922,6 +1297,7 @@ async def connect(request: Request):
         firebase_uid=firebase_uid, user_id=user_id, run_id=run_id,
         mode=mode, existing_memory=(memory or {}).get("long_term_memory", {}),
         existing_open_loops=(memory or {}).get("open_loops", []),
+        profile=profile,
     ))
 
     return {"url": url, "token": user_token, "room": room_name,
@@ -936,6 +1312,8 @@ async def _run_bot_safe(room_name: str, system_prompt: str, **kwargs):
     except Exception as exc:
         _log(f"BOT ERROR room={room_name}: {type(exc).__name__}: {exc}")
         print("[mira] traceback:\n" + traceback.format_exc(), flush=True)
+
+
 
 
 
