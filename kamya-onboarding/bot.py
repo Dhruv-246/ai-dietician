@@ -1113,7 +1113,8 @@ async def _memory_view_inner(request, uid):
     if prefs.get("cuisine"):
         pref_items["cuisine"] = prefs["cuisine"]
     if pref_items:
-        ltm_html += f"<h3>Preferences</h3>{kv_table(pref_items, highlight_keys={{'dislikes'}})}"
+        _hl_dislike = {"dislikes"}
+        ltm_html += f"<h3>Preferences</h3>{kv_table(pref_items, highlight_keys=_hl_dislike)}"
 
     # Goals
     if any(goals_d.get(k) for k in ("primary_goal", "target", "motivation")):
@@ -1132,7 +1133,8 @@ async def _memory_view_inner(request, uid):
     if progress_d.get("struggles"):
         prog_items["struggles"] = progress_d["struggles"]
     if prog_items:
-        ltm_html += f"<h3>Progress</h3>{kv_table(prog_items, highlight_keys={{'what_failed', 'struggles'}})}"
+        _hl_prog = {"what_failed", "struggles"}
+        ltm_html += f"<h3>Progress</h3>{kv_table(prog_items, highlight_keys=_hl_prog)}"
 
     # Entities
     ents = ltm.get("entities") or []
