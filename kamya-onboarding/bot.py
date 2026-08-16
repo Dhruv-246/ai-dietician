@@ -925,9 +925,18 @@ async def memory_view(request: Request):
     history. Prototype view — anyone with the uid can see it, so keep it
     auth-gated before production (it's personal health data)."""
     import html as _html
+    import traceback as _tb
     uid = request.query_params.get("uid")
     if not uid:
         return HTMLResponse("<p style='font-family:sans-serif;padding:40px'>Add <code>?uid=…</code> to view a user's memory.</p>")
+    try:
+        return await _memory_view_inner(request, uid)
+    except Exception:
+        err = _html.escape(_tb.format_exc())
+        return HTMLResponse(f"<pre style='font-family:monospace;padding:20px;white-space:pre-wrap'>{err}</pre>", status_code=500)
+
+async def _memory_view_inner(request, uid):
+    import html as _html
 
     mem = memory_store.load_memory(uid)
     user_id = mem.get("user_id", "")
