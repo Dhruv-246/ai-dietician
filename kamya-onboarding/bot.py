@@ -964,7 +964,8 @@ async def memory_view(request: Request):
             else:
                 val = esc(str(v))
             rows.append(f"<li{cls}><strong>{esc(label)}:</strong> {val}</li>")
-        return f"<ul>{''.join(rows)}</ul>" if rows else "<p class='empty'>— nothing yet —</p>"
+        joined = "".join(rows)
+        return f"<ul>{joined}</ul>" if rows else "<p class='empty'>— nothing yet —</p>"
 
     def med_list(meds):
         if not meds:
