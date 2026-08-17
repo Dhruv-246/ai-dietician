@@ -20,8 +20,12 @@ import os
 
 from groq import Groq
 
-# llama-3.1-8b-instant was decommissioned 2026-08-16; this is Groq's replacement.
-_MODEL = os.getenv("GROQ_CONSOLIDATION_MODEL", "openai/gpt-oss-20b")
+# llama-3.1-8b-instant was decommissioned 2026-08-16. Its drop-in replacement
+# (gpt-oss-20b) fails this prompt with json_validate_failed and an empty
+# generation, so consolidation silently lost the whole memory write. The 120b
+# follows the strict schema reliably. This runs once, after hangup — latency
+# doesn't matter here, correctness does.
+_MODEL = os.getenv("GROQ_CONSOLIDATION_MODEL", "openai/gpt-oss-120b")
 
 _SYSTEM = """\
 You maintain the long-term memory of a user for Mira, an AI dietician focused on Indian users.
