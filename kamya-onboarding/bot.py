@@ -667,13 +667,16 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         )
 
     # TTS engine selection. TTS_ENGINE env:
-    #  - "cartesia" (DEFAULT): Cartesia Sonic 3.5 — 42 languages incl. Hindi,
-    #    native Hinglish voice, WebSocket streaming. Needs CARTESIA_API_KEY.
-    #  - "gemini": Gemini TTS — quota-limited preview model.
+    #  - "gemini" (DEFAULT): Gemini TTS — free tier, but a quota-limited preview
+    #    model. Needs GEMINI_TTS_API_KEY. Steer Hinglish with GEMINI_TTS_STYLE:
+    #    the genai backend ignores `language`, so the style prefix is the only lever.
+    #  - "cartesia": Cartesia Sonic 3.5 — 42 languages incl. Hindi, native Hinglish
+    #    voice, WebSocket streaming. Paid. Needs CARTESIA_API_KEY. Fall back here
+    #    by hand if Gemini's quota runs out — there is no automatic failover.
     #  - "sarvam": Sarvam bulbul — native Indian accent, free, very reliable.
     #  - "elevenlabs": ElevenLabs (Indian "Simran" voice needs a PAID plan/owned voice).
     #  - "auto": ElevenLabs when it has credits, else Sarvam.
-    _tts_engine = os.getenv("TTS_ENGINE", "cartesia").strip().lower()
+    _tts_engine = os.getenv("TTS_ENGINE", "gemini").strip().lower()
     if _tts_engine == "auto":
         _tts_engine = "elevenlabs" if await asyncio.to_thread(_elevenlabs_has_credits) else "sarvam"
 
