@@ -635,7 +635,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         )
 
     # LLM engine. LLM_ENGINE env:
-    #  - "groq" (DEFAULT): Groq llama-3.3-70b-versatile — fast, free, good Hinglish.
+    #  - "groq" (DEFAULT): Groq openai/gpt-oss-120b — fast, free, good Hinglish.
     #    Not a reasoning model (answers directly), which is best for voice latency.
     #  - "deepseek": DeepSeek deepseek-reasoner (thinking model; needs a PAID key).
     #  - "gemini": Gemini (GEMINI_MODEL, default gemini-3.5-flash).
@@ -659,7 +659,9 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     else:  # groq (default; also the fallback when deepseek is requested w/o a key)
         if _llm_engine == "deepseek":
             _log(f"llm=groq (DEEPSEEK_API_KEY missing) room={room_name}")
-        groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        # llama-3.3-70b-versatile was decommissioned 2026-08-16; this is Groq's
+        # recommended replacement. Alternative: qwen/qwen3.6-27b.
+        groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
         _log(f"llm=groq model={groq_model} room={room_name}")
         llm = GroqLLMService(
             api_key=os.getenv("GROQ_API_KEY"),

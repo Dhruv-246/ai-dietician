@@ -52,7 +52,7 @@ The bot speaks **Hinglish** — Hindi words in Devanagari + English words, e.g.
 - The `SYSTEM_PROMPT` in `bot.py` instructs Hinglish output in Devanagari.
 
 ## Tuning
-- **Model:** `GROQ_MODEL` (default `llama-3.3-70b-versatile`).
+- **Model:** `GROQ_MODEL` (default `openai/gpt-oss-120b`).
 - **More Hindi / less English:** set `STT_LANGUAGE=hi`.
 - **The script/persona:** edit `SYSTEM_PROMPT` in `bot.py`.
 

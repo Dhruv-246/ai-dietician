@@ -20,7 +20,8 @@ import os
 
 from groq import Groq
 
-_MODEL = os.getenv("GROQ_CONSOLIDATION_MODEL", "llama-3.1-8b-instant")
+# llama-3.1-8b-instant was decommissioned 2026-08-16; this is Groq's replacement.
+_MODEL = os.getenv("GROQ_CONSOLIDATION_MODEL", "openai/gpt-oss-20b")
 
 _SYSTEM = """\
 You maintain the long-term memory of a user for Mira, an AI dietician focused on Indian users.
