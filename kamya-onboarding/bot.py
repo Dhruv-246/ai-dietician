@@ -669,16 +669,19 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         )
 
     # TTS engine selection. TTS_ENGINE env:
-    #  - "gemini" (DEFAULT): Gemini TTS — free tier, but a quota-limited preview
-    #    model. Needs GEMINI_TTS_API_KEY. Steer Hinglish with GEMINI_TTS_STYLE:
-    #    the genai backend ignores `language`, so the style prefix is the only lever.
-    #  - "cartesia": Cartesia Sonic 3.5 — 42 languages incl. Hindi, native Hinglish
-    #    voice, WebSocket streaming. Paid. Needs CARTESIA_API_KEY. Fall back here
-    #    by hand if Gemini's quota runs out — there is no automatic failover.
+    #  - "cartesia" (DEFAULT): Cartesia Sonic 3.5 — Hindi + native Hinglish voice,
+    #    WebSocket streaming, ~0.3s to first audio. Paid. Needs CARTESIA_API_KEY.
+    #  - "gemini": Gemini TTS — free, but measured 5-7s from `tts started` to first
+    #    audio on live calls (2026-08-17), vs Cartesia's ~0.3s. The preview TTS
+    #    models are built for offline rendering, not conversation. Usable for
+    #    development; too slow to put in front of users. Steer Hinglish with
+    #    GEMINI_TTS_STYLE — the genai backend ignores `language`, so the style
+    #    prefix is the only lever, and it is prepended to EVERY utterance (keep
+    #    it short; a long prefix is re-processed on every turn).
     #  - "sarvam": Sarvam bulbul — native Indian accent, free, very reliable.
     #  - "elevenlabs": ElevenLabs (Indian "Simran" voice needs a PAID plan/owned voice).
     #  - "auto": ElevenLabs when it has credits, else Sarvam.
-    _tts_engine = os.getenv("TTS_ENGINE", "gemini").strip().lower()
+    _tts_engine = os.getenv("TTS_ENGINE", "cartesia").strip().lower()
     if _tts_engine == "auto":
         _tts_engine = "elevenlabs" if await asyncio.to_thread(_elevenlabs_has_credits) else "sarvam"
 
