@@ -98,6 +98,7 @@ import memory_facts
 import memory_store
 import onboarding_nodes
 import rag
+import rag_query
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
 # is no .env — the platform injects the variables into the environment directly.
@@ -517,24 +518,39 @@ class _CaptionObserver(BaseObserver):
 
 
 class RAGProcessor(FrameProcessor):
-    """RAG injection. Sits between STT and the user aggregator. On each final
-    user transcription it retrieves the closest dietician Q&A from Supabase and
-    refreshes the base system prompt with a REFERENCE block (or clears it when
-    nothing relevant is found), so Mira answers in style — not by copying.
+    """RAG injection. Sits between STT and the user aggregator.
 
-    Why refresh the FIRST system message (not append a new one): Gemini only
-    honours a single system instruction, so the reference must live inside the
-    base prompt. We keep the original prompt in `self._base` and rebuild
-    messages[0] each turn = base [+ references]. It never accumulates, and any
-    retrieval error leaves the base prompt untouched (call proceeds normally)."""
+    Three things it is careful about, each fixing an observed problem:
+
+    1. IT DOES NOT RETRIEVE ON EVERYTHING. Logs used to show
+       `rag matched 3 q='Yeah.'` — three irrelevant dietician Q&As injected
+       because the user grunted. rag_query.is_retrievable() gates that out
+       with no model call.
+
+    2. IT RESOLVES CONTEXT-DEPENDENT QUERIES. "और कुछ?" means nothing on its
+       own; the topic lives in Mira's previous turn. rag_query.build_query()
+       folds the last turns in when (and only when) the utterance needs it.
+
+    3. IT NEVER TOUCHES messages[0]. The base system prompt — 4.7k chars on
+       ongoing calls, 9k on onboarding — stays byte-identical for the whole
+       call, so the prompt prefix is stable and re-processing it every turn is
+       avoidable. The reference block is a SEPARATE message appended at the end
+       of the context, which places it immediately before the user's new
+       utterance (the aggregator adds that after us). Exactly one reference
+       block ever exists: the previous one is removed before the new one lands.
+
+    Any retrieval error leaves the context untouched and the call proceeds.
+
+    NOTE: the block is injected as a second `system` message. Groq (the default
+    LLM_ENGINE) handles multiple system messages fine. If you switch
+    LLM_ENGINE=gemini, which honours only one system instruction, revisit this.
+    """
 
     def __init__(self, context, *, top_k: int = 3, min_similarity: float = 0.5):
         super().__init__()
         self._context = context
         self._top_k = top_k
         self._min_sim = min_similarity
-        msgs = context.get_messages()
-        self._base = (msgs[0].get("content") if msgs else "") or ""
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -547,21 +563,38 @@ class RAGProcessor(FrameProcessor):
             try:
                 await self._refresh(frame.text.strip())
             except Exception as exc:  # never break the call over retrieval
-                _log(f"rag refresh failed room=? : {exc}")
+                _log(f"rag refresh failed: {exc}")
         await self.push_frame(frame, direction)
 
+    def _strip_reference(self, msgs):
+        """Drop any previous reference block so it can never accumulate."""
+        return [m for m in msgs if not rag.is_reference_message(m)]
+
     async def _refresh(self, question: str):
-        matches = await rag.retrieve(question, k=self._top_k, min_similarity=self._min_sim)
         msgs = self._context.get_messages()
         if not msgs:
             return
+        cleaned = self._strip_reference(msgs)
+        had_reference = len(cleaned) != len(msgs)
+
+        ok, why = rag_query.is_retrievable(question)
+        if not ok:
+            # Clear last turn's stale reference, then stop. No embedding call,
+            # no Supabase round-trip, no noise in the prompt.
+            if had_reference:
+                self._context.set_messages(cleaned)
+            _log(f"rag skipped ({why}) q={question[:40]!r}")
+            return
+
+        query, strategy = rag_query.build_query(question, cleaned)
+        matches = await rag.retrieve(query, k=self._top_k, min_similarity=self._min_sim)
+
         if matches:
-            content = self._base + "\n\n" + rag.format_reference(matches)
-            _log(f"rag matched {len(matches)} q='{question[:40]}'")
+            cleaned.append({"role": "system", "content": rag.format_reference(matches)})
+            _log(f"rag matched {len(matches)} strategy={strategy} q={query[:70]!r}")
         else:
-            content = self._base
-        msgs[0] = {**msgs[0], "role": msgs[0].get("role", "system"), "content": content}
-        self._context.set_messages(msgs)
+            _log(f"rag no match strategy={strategy} q={query[:70]!r}")
+        self._context.set_messages(cleaned)
 
 
 # --------------------------------------------------------------------------- #

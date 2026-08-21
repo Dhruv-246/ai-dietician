@@ -113,16 +113,29 @@ async def retrieve(question: str, k: int = 3, min_similarity: float = 0.5) -> li
         return []
 
 
+# First line of every reference block. Doubles as the marker RAGProcessor uses
+# to find and replace the previous turn's block, so it must stay stable and
+# must not appear in the base system prompt.
+REFERENCE_HEADER = (
+    "REFERENCE — how real dieticians answered questions like this. Use them "
+    "ONLY for tone, direction, and correct facts. Do NOT read them back or "
+    "copy their wording. Answer for THIS user, in your own short casual "
+    "Hinglish, using what you already know about them:"
+)
+
+
+def is_reference_message(msg) -> bool:
+    """True if this context message is an injected reference block."""
+    if not isinstance(msg, dict):
+        return False
+    content = msg.get("content")
+    return isinstance(content, str) and content.startswith(REFERENCE_HEADER)
+
+
 def format_reference(matches: list[dict]) -> str:
-    """Render matches into a REFERENCE block for the system prompt. The framing
-    is deliberate: use for style/direction, do not parrot."""
-    lines = [
-        "REFERENCE — how real dieticians answered questions like this. Use them "
-        "ONLY for tone, direction, and correct facts. Do NOT read them back or "
-        "copy their wording. Answer for THIS user, in your own short casual "
-        "Hinglish, using what you already know about them:",
-        "",
-    ]
+    """Render matches into a REFERENCE block. The framing is deliberate: use
+    for style/direction, do not parrot."""
+    lines = [REFERENCE_HEADER, ""]
     for i, m in enumerate(matches, 1):
         q = (m.get("question") or "").strip()
         a = (m.get("answer") or "").strip()
