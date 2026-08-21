@@ -835,30 +835,65 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     await PipelineRunner(handle_sigint=False).run(task)
     _log(f"pipeline finished room={room_name}")
 
-    # --- End-of-session memory consolidation (off the audio path) ------------
-    # The call has ended. Read the transcript from the context, extract durable
-    # memory + summary + open loops (one LLM call), and MERGE into the user's
-    # cumulative long-term memory. Runs for both modes (onboarding seeds v1).
+    # --- End of session: PERSIST FIRST, then consolidate --------------------
+    # Ordering here is the whole point. The transcript is written to the
+    # Sessions tab before any LLM is involved, so a malformed consolidation
+    # response costs the memory *update* and never the conversation. Anything
+    # left un-consolidated keeps its transcript and is replayable via
+    # POST /reprocess. Consolidated memory is a derived artefact; the
+    # transcript is the source of truth.
     if firebase_uid:
-        try:
-            transcript = _transcript_from_context(context)
-            user_turns = sum(1 for m in context.get_messages() if m.get("role") == "user")
-            if user_turns >= 1:
-                _log(f"consolidating room={room_name} turns={user_turns}")
-                result = consolidate.consolidate(existing_memory or {}, existing_open_loops or [], transcript)
-                memory_store.save_consolidation(
-                    firebase_uid=firebase_uid, user_id=user_id, run_id=run_id,
-                    session_type=mode, started_at=started_at,
-                    ended_at=datetime.now(timezone.utc).isoformat(),
+        ended_at = datetime.now(timezone.utc).isoformat()
+        transcript = _transcript_from_context(context)
+        user_turns = sum(1 for m in context.get_messages() if m.get("role") == "user")
+
+        stored = False
+        if user_turns >= 1:
+            try:
+                memory_store.save_session_raw(
+                    session_id=run_id, firebase_uid=firebase_uid, user_id=user_id,
+                    session_type=mode, started_at=started_at, ended_at=ended_at,
+                    transcript=transcript, turns=user_turns,
+                )
+                stored = True
+                _log(f"transcript saved room={room_name} session={run_id} "
+                     f"turns={user_turns} chars={len(transcript)}")
+            except Exception as exc:
+                # The only genuinely unrecoverable failure left. Dump the
+                # transcript to the log so it is at least retrievable by hand.
+                _log(f"CRITICAL transcript save FAILED room={room_name} "
+                     f"session={run_id}: {exc}")
+                _log(f"CRITICAL unsaved transcript session={run_id}: {transcript}")
+        else:
+            _log(f"no user turns room={room_name} -> nothing to store")
+
+        if stored:
+            try:
+                _log(f"consolidating room={room_name} session={run_id} turns={user_turns}")
+                result = consolidate.consolidate(
+                    existing_memory or {}, existing_open_loops or [], transcript)
+                memory_store.save_user_memory(
+                    firebase_uid=firebase_uid, session_type=mode, ended_at=ended_at,
                     merged_memory=result["long_term_memory"],
                     session_summary=result["session_summary"],
                     open_loops=result["open_loops"],
                 )
-                _log(f"memory saved room={room_name} open_loops={len(result['open_loops'])}")
-            else:
-                _log(f"no user turns room={room_name} -> skip consolidation")
-        except Exception as exc:
-            _log(f"consolidation failed room={room_name}: {exc}")
+                memory_store.finalize_session(
+                    run_id, status=memory_store.STATUS_DONE,
+                    session_summary=result["session_summary"],
+                    open_loops=result["open_loops"],
+                    consolidated_at=datetime.now(timezone.utc).isoformat(),
+                )
+                _log(f"memory saved room={room_name} session={run_id} "
+                     f"open_loops={len(result['open_loops'])}")
+            except Exception as exc:
+                _log(f"consolidation failed room={room_name} session={run_id} "
+                     f"(transcript kept, replayable): {exc}")
+                try:
+                    memory_store.finalize_session(
+                        run_id, status=memory_store.STATUS_FAILED, error=str(exc))
+                except Exception as mark_exc:
+                    _log(f"could not mark session failed {run_id}: {mark_exc}")
 
 
 def _transcript_from_context(context) -> str:
@@ -923,6 +958,105 @@ async def healthz():
 async def events():
     """Temporary: last pipeline events (to see where audio dies)."""
     return {"events": list(_EVENTS)}
+
+
+@app.get("/pending")
+async def pending_sessions():
+    """Sessions whose transcript is stored but whose consolidation never landed.
+
+    The recovery queue. Every row here still holds the full conversation, so
+    nothing is lost — the memory update just needs re-running.
+    """
+    try:
+        rows = await asyncio.to_thread(memory_store.get_replayable_sessions, 50)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return {
+        "count": len(rows),
+        "sessions": [
+            {k: v for k, v in r.items() if k != "transcript"} | {
+                "transcript_chars": len(r["transcript"])
+            }
+            for r in rows
+        ],
+    }
+
+
+def _reprocess_sync(session_id=None, limit=10):
+    """Re-run consolidation for stored-but-unconsolidated sessions. Blocking."""
+    rows = memory_store.get_replayable_sessions(limit=100)
+    if session_id:
+        rows = [r for r in rows if r["session_id"] == session_id]
+    rows = rows[:limit]
+
+    results = []
+    for r in rows:
+        sid = r["session_id"]
+        uid = r["firebase_uid"]
+        if not uid:
+            # Pre-durability rows have no firebase_uid, so memory cannot be
+            # attributed to a user. The transcript is still kept.
+            results.append({"session_id": sid, "ok": False,
+                            "error": "no firebase_uid on row"})
+            continue
+        try:
+            mem = memory_store.load_memory(uid)
+            result = consolidate.consolidate(
+                mem.get("long_term_memory") or {},
+                mem.get("open_loops") or [],
+                r["transcript"],
+            )
+            memory_store.save_user_memory(
+                firebase_uid=uid, session_type=r["type"],
+                ended_at=r["ended_at"] or datetime.now(timezone.utc).isoformat(),
+                merged_memory=result["long_term_memory"],
+                session_summary=result["session_summary"],
+                open_loops=result["open_loops"],
+            )
+            memory_store.finalize_session(
+                sid, status=memory_store.STATUS_DONE,
+                session_summary=result["session_summary"],
+                open_loops=result["open_loops"],
+                consolidated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            _log(f"reprocessed session={sid} open_loops={len(result['open_loops'])}")
+            results.append({"session_id": sid, "ok": True,
+                            "open_loops": len(result["open_loops"])})
+        except Exception as exc:
+            try:
+                memory_store.finalize_session(
+                    sid, status=memory_store.STATUS_FAILED, error=str(exc))
+            except Exception:
+                pass
+            _log(f"reprocess failed session={sid}: {exc}")
+            results.append({"session_id": sid, "ok": False, "error": str(exc)[:300]})
+    return results
+
+
+@app.post("/reprocess")
+async def reprocess(request: Request):
+    """Replay consolidation for sessions that stored a transcript but failed.
+
+    Body (all optional): {"session_id": "run-abc123", "limit": 10}
+
+    Set ADMIN_TOKEN on the service to require ?token=... — this endpoint writes
+    to user memory, so lock it down in anything user-facing.
+    """
+    admin = (os.getenv("ADMIN_TOKEN") or "").strip()
+    if admin and request.query_params.get("token") != admin:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session_id = (body or {}).get("session_id")
+    limit = int((body or {}).get("limit") or 10)
+    try:
+        results = await asyncio.to_thread(_reprocess_sync, session_id, limit)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    ok = sum(1 for r in results if r["ok"])
+    return {"attempted": len(results), "succeeded": ok, "results": results}
 
 
 

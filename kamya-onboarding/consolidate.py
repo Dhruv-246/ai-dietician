@@ -255,14 +255,79 @@ VERY IMPORTANT — start from the EXISTING open loops, do not regenerate from sc
 Leave fields as null or [] when no information is available — do NOT guess or invent."""
 
 
-def consolidate(existing_memory: dict, existing_open_loops: list, transcript: str) -> dict:
-    """Return {long_term_memory, session_summary, open_loops}. Raises on failure.
+class ConsolidationError(RuntimeError):
+    """The model's response was unusable. Carries the reason for a repair retry."""
+
+
+def _leaf_count(obj) -> int:
+    """Count non-empty leaf values in a nested dict/list — a crude 'how much do
+    we know about this user' measure, used to detect destructive merges."""
+    if obj is None or obj == "" or obj == [] or obj == {}:
+        return 0
+    if isinstance(obj, dict):
+        return sum(_leaf_count(v) for v in obj.values())
+    if isinstance(obj, list):
+        return sum(_leaf_count(v) for v in obj)
+    return 1
+
+
+def _validate(data, existing_memory: dict) -> dict:
+    """Return the normalised result, or raise ConsolidationError.
+
+    Guards against the two ways a bad response silently destroys memory:
+    a wrong-shaped payload, and a payload that drops most of what we knew.
+    """
+    if not isinstance(data, dict):
+        raise ConsolidationError("top level is not a JSON object")
+
+    ltm = data.get("long_term_memory")
+    if not isinstance(ltm, dict):
+        raise ConsolidationError("`long_term_memory` is missing or not an object")
+
+    loops = data.get("open_loops", [])
+    if loops is None:
+        loops = []
+    if not isinstance(loops, list):
+        raise ConsolidationError("`open_loops` must be a list of strings")
+
+    summary = data.get("session_summary", "") or ""
+    if not isinstance(summary, str):
+        raise ConsolidationError("`session_summary` must be a string")
+
+    # Non-destructive guard. Memory is cumulative by design, so a merge that
+    # halves what we knew is a model error, not a real update. Only applies
+    # once there is something meaningful to lose.
+    before = _leaf_count(existing_memory or {})
+    after = _leaf_count(ltm)
+    if before >= 6 and after < before * 0.5:
+        raise ConsolidationError(
+            f"destructive merge rejected: {before} known facts -> {after}. "
+            "Memory is cumulative — copy every existing field through unless "
+            "the transcript explicitly contradicts it."
+        )
+
+    return {
+        "long_term_memory": ltm,
+        "session_summary": summary.strip(),
+        "open_loops": loops,
+    }
+
+
+def consolidate(existing_memory: dict, existing_open_loops: list, transcript: str,
+                attempts: int = 3) -> dict:
+    """Return {long_term_memory, session_summary, open_loops}.
+
+    Retries with the validation error fed back to the model, because the
+    observed failures are recoverable: a 400 json_validate_failed with an empty
+    generation, or a structurally wrong payload. Raises ConsolidationError if
+    every attempt fails — the caller keeps the stored transcript and the session
+    stays replayable.
 
     `existing_open_loops` is the user's current open loops; the model merges them
     with this conversation (removes resolved, keeps unresolved, adds new).
     """
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    user_msg = (
+    base_msg = (
         "EXISTING MEMORY:\n"
         + json.dumps(existing_memory or {}, ensure_ascii=False)
         + "\n\nEXISTING OPEN LOOPS:\n"
@@ -270,18 +335,33 @@ def consolidate(existing_memory: dict, existing_open_loops: list, transcript: st
         + "\n\nTRANSCRIPT:\n"
         + (transcript or "").strip()
     )
-    resp = client.chat.completions.create(
-        model=_MODEL,
-        messages=[
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.2,
-        response_format={"type": "json_object"},
-    )
-    data = json.loads(resp.choices[0].message.content)
-    return {
-        "long_term_memory": data.get("long_term_memory", {}) or {},
-        "session_summary": (data.get("session_summary", "") or "").strip(),
-        "open_loops": data.get("open_loops", []) or [],
-    }
+
+    last_error = ""
+    for attempt in range(1, max(1, attempts) + 1):
+        user_msg = base_msg
+        if last_error:
+            user_msg += (
+                f"\n\nYOUR PREVIOUS ATTEMPT WAS REJECTED: {last_error}\n"
+                "Return ONLY valid JSON matching the schema exactly."
+            )
+        try:
+            resp = client.chat.completions.create(
+                model=_MODEL,
+                messages=[
+                    {"role": "system", "content": _SYSTEM},
+                    {"role": "user", "content": user_msg},
+                ],
+                # Nudge off a deterministic bad path on retries.
+                temperature=0.2 if attempt == 1 else 0.4,
+                response_format={"type": "json_object"},
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            if not content:
+                raise ConsolidationError("model returned an empty response")
+            return _validate(json.loads(content), existing_memory or {})
+        except Exception as exc:  # API errors, JSON errors, validation errors
+            last_error = f"{type(exc).__name__}: {exc}"[:400]
+            print(f"[consolidate] attempt {attempt}/{attempts} failed: {last_error}",
+                  flush=True)
+
+    raise ConsolidationError(f"all {attempts} attempts failed. last error: {last_error}")
