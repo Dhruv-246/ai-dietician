@@ -53,6 +53,7 @@ try:
         LLMRunFrame,
         LLMTextFrame,
         TranscriptionFrame,
+        TTSSpeakFrame,
         TTSStartedFrame,
         TTSAudioRawFrame,
         UserStartedSpeakingFrame,
@@ -99,6 +100,7 @@ import memory_store
 import onboarding_nodes
 import rag
 import rag_query
+import stt_vocab
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
 # is no .env — the platform injects the variables into the environment directly.
@@ -457,6 +459,19 @@ class _DiagObserver(BaseObserver):
 
     async def on_push_frame(self, data: "FramePushed"):
         frame = data.frame
+        # The observer sees every frame once PER PIPELINE HOP. Without this the
+        # log showed one barge-in as 12 identical "USER started speaking" lines
+        # and one utterance as 8-12 "BOT speaking START" lines, which reads like
+        # a turn-detection problem that isn't there. _CaptionObserver below has
+        # always deduped; this one declared the set and never used it.
+        fid = getattr(frame, "id", None)
+        if fid is not None:
+            if fid in self._seen:
+                return
+            self._seen.add(fid)
+            if len(self._seen) > 4000:      # bound memory on long calls
+                self._seen.clear()
+                self._seen.add(fid)
         if isinstance(frame, ErrorFrame):
             _log(f"ERROR FRAME: {getattr(frame, 'error', frame)}")
             return
@@ -515,6 +530,121 @@ class _CaptionObserver(BaseObserver):
             full = "".join(self._bot_text)
             self._bot_text = []
             await self._send("assistant", full)
+
+
+def _stt_keyterms():
+    """Keyterms for Flux. DEEPGRAM_KEYTERMS (comma-separated) overrides."""
+    raw = (os.getenv("DEEPGRAM_KEYTERMS") or "").strip()
+    if raw:
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    return stt_vocab.DEFAULT_KEYTERMS
+
+
+def _transcript_confidence(frame):
+    """Best-effort confidence for a TranscriptionFrame, or None.
+
+    TranscriptionFrame has no confidence field in pipecat 1.7.0 — only
+    `result`, the raw STT payload, whose shape is provider-specific and not
+    guaranteed. So this probes the common shapes and returns None rather than
+    guessing. None means "unknown", which is treated as acceptable: refusing
+    real speech is worse than passing a bad transcript to the next gate.
+    """
+    res = getattr(frame, "result", None)
+    if res is None:
+        return None
+    for probe in (
+        lambda r: r.get("confidence"),
+        lambda r: r["channel"]["alternatives"][0]["confidence"],
+        lambda r: r["alternatives"][0]["confidence"],
+        lambda r: getattr(r, "confidence"),
+    ):
+        try:
+            val = probe(res)
+            if val is not None:
+                return float(val)
+        except Exception:
+            continue
+    return None
+
+
+class TranscriptGate(FrameProcessor):
+    """Drop unusable transcriptions before they reach RAG or the LLM.
+
+    The log showed Mira answering this:
+
+      caption sent role=user len=38
+      rag matched 3 q='तूं तक चला से देना और मैं सोचूंगा ना चलो'
+
+    Nobody said that. STT produced word salad, and the whole pipeline —
+    retrieval, LLM, TTS — ran on it, so Mira replied to something the user
+    never said. That is worse than silence: it makes her look like she is not
+    listening.
+
+    Two gates, cheapest first:
+      1. confidence, when the STT service exposes it (Flux `min_confidence`
+         handles most of this server-side; this catches the rest)
+      2. a repetition heuristic — the same token three or more times in a row
+         is a recogniser artefact, not speech
+
+    On a drop the transcription is swallowed (no LLM turn) and Mira asks the
+    user to repeat, so they get feedback instead of dead air. Consecutive drops
+    are capped: after MAX_STRIKES the transcript is let through rather than
+    looping "say that again" forever.
+    """
+
+    MAX_STRIKES = 2
+
+    def __init__(self, min_confidence=None):
+        super().__init__()
+        env = (os.getenv("STT_MIN_CONFIDENCE") or "").strip()
+        self._min_conf = min_confidence if min_confidence is not None else (
+            float(env) if env else 0.0)
+        self._strikes = 0
+        self._reprompts = [
+            "Sorry, wo theek se sunai nahi diya. Phir se boliye?",
+            "Aawaz kat rahi hai — ek baar phir bataiye?",
+        ]
+        self._i = 0
+
+    def _reason(self, frame, text):
+        conf = _transcript_confidence(frame)
+        if self._min_conf > 0 and conf is not None and conf < self._min_conf:
+            return f"low confidence {conf:.2f} < {self._min_conf:.2f}"
+        toks = [t for t in re.split(r"[^\w\u0900-\u097f]+", text.lower()) if t]
+        run = 1
+        for a, b in zip(toks, toks[1:]):
+            run = run + 1 if a == b else 1
+            if run >= 3:
+                return f"repeated token {a!r} x{run}"
+        return None
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if (
+            direction == FrameDirection.DOWNSTREAM
+            and isinstance(frame, TranscriptionFrame)
+            and (getattr(frame, "text", "") or "").strip()
+        ):
+            text = frame.text.strip()
+            reason = self._reason(frame, text)
+            if reason:
+                if self._strikes < self.MAX_STRIKES:
+                    self._strikes += 1
+                    _log(f"transcript DROPPED ({reason}) strike={self._strikes} "
+                         f"text={text[:50]!r}")
+                    prompt = self._reprompts[self._i % len(self._reprompts)]
+                    self._i += 1
+                    await self.push_frame(TTSSpeakFrame(prompt), direction)
+                    return                  # never reaches RAG or the LLM
+                # Cap reached — let it through and STAY capped. Resetting here
+                # would re-drop the next bad transcript, giving an endless
+                # drop/drop/pass cycle. Only a clean transcript clears it, so a
+                # persistently bad mic degrades to "pass everything" rather
+                # than "ask them to repeat forever".
+                _log(f"transcript kept despite {reason} (strike cap reached)")
+            else:
+                self._strikes = 0
+        await self.push_frame(frame, direction)
 
 
 class RAGProcessor(FrameProcessor):
@@ -634,7 +764,8 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     _stt_engine = os.getenv("STT_ENGINE", "deepgram").strip().lower()
     if _stt_engine == "deepgram" and os.getenv("DEEPGRAM_API_KEY"):
         dg_model = os.getenv("DEEPGRAM_STT_MODEL", "flux-general-multi")
-        _log(f"stt=deepgram-flux model={dg_model} hints=hi,en room={room_name}")
+        _log(f"stt=deepgram-flux model={dg_model} hints=hi,en "
+             f"keyterms={len(_stt_keyterms())} room={room_name}")
         # Flux has BUILT-IN turn-taking:
         #  - End-of-turn: detects when the user is done (semantic + acoustic, incl.
         #    trailing "hmm"/pauses) -> emits final transcript so Mira replies.
@@ -642,7 +773,28 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # Tunables (env, optional): DEEPGRAM_EOT_THRESHOLD (confidence, def 0.7),
         # DEEPGRAM_EOT_TIMEOUT_MS (hard cap, def 5000), DEEPGRAM_EAGER_EOT (enable
         # early-response prediction; lower = snappier but more re-tries).
+        #
+        # ON FALSE BARGE-INS: the 2026-08-17 log appeared to show a dozen
+        # "USER started speaking" events per turn. That was _DiagObserver
+        # logging one frame once per pipeline hop, not a dozen interruptions —
+        # fixed there, not here. Deepgram defaults are therefore left ALONE
+        # until a deduped log shows a real problem. If it does, raise
+        # DEEPGRAM_EOT_THRESHOLD (0.8-0.9) so Flux needs more certainty before
+        # ending a turn, and/or raise DEEPGRAM_EOT_TIMEOUT_MS to let the user
+        # pause longer mid-thought. Both trade latency for patience — measure
+        # before changing.
         flux_kwargs = dict(model=dg_model, language_hints=[Language.HI, Language.EN])
+        # Keyterm boosting: Flux weights these toward being recognised. Domain
+        # vocabulary is exactly what a general model gets wrong, and a wrong
+        # condition name is worse than a wrong food name. Override wholesale
+        # with DEEPGRAM_KEYTERMS (comma-separated).
+        flux_kwargs["keyterm"] = _stt_keyterms()
+        # min_confidence makes Deepgram itself withhold transcripts it does not
+        # believe, so garbage never enters the pipeline at all. Kept low by
+        # default because dropping real speech is worse than a bad transcript;
+        # TranscriptGate below is the second line of defence.
+        if os.getenv("DEEPGRAM_MIN_CONFIDENCE"):
+            flux_kwargs["min_confidence"] = float(os.getenv("DEEPGRAM_MIN_CONFIDENCE"))
         if os.getenv("DEEPGRAM_EOT_THRESHOLD"):
             flux_kwargs["eot_threshold"] = float(os.getenv("DEEPGRAM_EOT_THRESHOLD"))
         if os.getenv("DEEPGRAM_EOT_TIMEOUT_MS"):
@@ -696,10 +848,17 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # llama-3.3-70b-versatile was decommissioned 2026-08-16; this is Groq's
         # recommended replacement. Alternative: qwen/qwen3.6-27b.
         groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-        _log(f"llm=groq model={groq_model} room={room_name}")
+        # Hard ceiling on reply length. Measured on 2026-08-17: replies of 211
+        # chars had Mira speaking for 12-19 seconds unbroken, which is punishing
+        # on a phone call regardless of how fast TTS is. The prompt asks for
+        # 1-2 sentences; this is the backstop for when it doesn't listen.
+        # ~120 tokens is roughly three spoken sentences of Hinglish.
+        _max_tok = int(os.getenv("LLM_MAX_TOKENS", "120"))
+        _log(f"llm=groq model={groq_model} max_tokens={_max_tok} room={room_name}")
         llm = GroqLLMService(
             api_key=os.getenv("GROQ_API_KEY"),
-            settings=GroqLLMService.Settings(model=groq_model),
+            settings=GroqLLMService.Settings(model=groq_model,
+                                             max_tokens=_max_tok),
         )
 
     # TTS engine selection. TTS_ENGINE env:
@@ -816,6 +975,9 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     stages = [
         transport.input(),            # mic in (from LiveKit)
         stt,                          # speech -> text
+        # Sits immediately after STT so an unusable transcript never reaches
+        # the node machine, RAG, or the LLM. Applies to BOTH modes.
+        TranscriptGate(),
     ]
     if mode == "onboarding":
         # Onboarding: node-based state machine controls the call flow.
