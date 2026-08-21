@@ -29,6 +29,7 @@ import profile_store
 
 TAB_USERS = "users"
 TAB_SESSIONS = "Sessions"
+TAB_FACTS = "MemoryFacts"
 
 # Session lifecycle. A row is written as PENDING before consolidation runs;
 # it then becomes DONE, or FAILED with the error kept for diagnosis. Both
@@ -52,6 +53,15 @@ _SESSIONS_HEADER = [
     "session_summary", "open_loops",
     "firebase_uid", "turns", "status", "transcript", "error",
     "attempts", "consolidated_at",
+]
+
+# One row per fact-version. APPEND-ONLY: rows are never rewritten except to
+# stamp invalidated_at/invalidated_by when a later fact supersedes them. Column
+# order matches the dicts produced by memory_facts.apply_patch().
+_FACTS_HEADER = [
+    "fact_id", "firebase_uid", "user_id", "path", "op", "value",
+    "valid_from", "invalidated_at", "invalidated_by",
+    "session_id", "evidence", "confidence", "status", "reason", "created_at",
 ]
 
 _schema_ready = False
@@ -83,6 +93,16 @@ def _add_missing_columns(ws, wanted):
             ws.update_cell(1, idx, col)
 
 
+def _facts_ws():
+    ss = profile_store.get_spreadsheet()
+    try:
+        return ss.worksheet(TAB_FACTS)
+    except Exception:
+        ws = ss.add_worksheet(title=TAB_FACTS, rows=2000, cols=len(_FACTS_HEADER))
+        ws.append_row(_FACTS_HEADER, value_input_option="RAW")
+        return ws
+
+
 def ensure_schema():
     """Add memory columns to Users and durability columns to Sessions. Idempotent.
 
@@ -95,6 +115,7 @@ def ensure_schema():
         return
     _add_missing_columns(_users_ws(), _MEM_COLS)
     _add_missing_columns(_sessions_ws(), _SESSIONS_HEADER)
+    _add_missing_columns(_facts_ws(), _FACTS_HEADER)
     _schema_ready = True
 
 
@@ -325,6 +346,108 @@ def save_user_memory(firebase_uid, session_type, ended_at,
         "last_session_at": ended_at,
         "session_count": prev_count + 1,
     }
+    if session_type == "onboarding":
+        updates["onboarding_call_done"] = "TRUE"
+    batch = [
+        {"range": rowcol_to_a1(row_idx, header.index(name) + 1), "values": [[val]]}
+        for name, val in updates.items() if name in header
+    ]
+    if batch:
+        ws.batch_update(batch, value_input_option="RAW")
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Fact ledger (MemoryFacts tab). Append-only source of truth for what Mira     #
+# knows. The projection is cached on the users row, so the LIVE CALL PATH      #
+# never reads this tab — only consolidation and the audit view do.             #
+# --------------------------------------------------------------------------- #
+
+def load_facts(firebase_uid):
+    """Every ledger row for one user, in sheet (chronological) order."""
+    firebase_uid = str(firebase_uid or "").strip()
+    if not firebase_uid:
+        return []
+    try:
+        ensure_schema()
+        return [
+            {k: ("" if v is None else str(v)) for k, v in r.items()}
+            for r in _facts_ws().get_all_records()
+            if str(r.get("firebase_uid", "")).strip() == firebase_uid
+        ]
+    except Exception as exc:
+        print(f"[memory] facts read failed: {exc}", flush=True)
+        return []
+
+
+def append_facts(rows):
+    """Append ledger rows (applied AND rejected) in one batched write."""
+    if not rows:
+        return 0
+    ensure_schema()
+    ws = _facts_ws()
+    header = ws.row_values(1)
+    payload = [[r.get(col, "") for col in header] for r in rows]
+    ws.append_rows(payload, value_input_option="RAW")
+    return len(payload)
+
+
+def stamp_invalidations(pairs, at):
+    """Close superseded facts: set invalidated_at / invalidated_by by fact_id.
+
+    The ONLY write that touches an existing ledger row, and it never alters
+    the fact's value or evidence — history stays intact.
+    """
+    pairs = [(str(a), str(b)) for a, b in (pairs or []) if a]
+    if not pairs:
+        return 0
+    ensure_schema()
+    ws = _facts_ws()
+    header = ws.row_values(1)
+    for col in ("fact_id", "invalidated_at", "invalidated_by"):
+        if col not in header:
+            return 0
+    ids = ws.col_values(header.index("fact_id") + 1)
+    at_col = header.index("invalidated_at") + 1
+    by_col = header.index("invalidated_by") + 1
+
+    row_of = {}
+    for i in range(1, len(ids)):
+        row_of.setdefault(ids[i].strip(), i + 1)
+
+    batch = []
+    for fact_id, by in pairs:
+        r = row_of.get(fact_id)
+        if not r:
+            continue
+        batch.append({"range": rowcol_to_a1(r, at_col), "values": [[at]]})
+        batch.append({"range": rowcol_to_a1(r, by_col), "values": [[by]]})
+    if batch:
+        ws.batch_update(batch, value_input_option="RAW")
+    return len(batch) // 2
+
+
+def cache_current_view(firebase_uid, view, open_loops, session_summary, ended_at,
+                       session_type, bump_count=True):
+    """Write the projected view onto the users row.
+
+    `long_term_memory` stays the same 12-section shape it always was, so
+    _build_user_context() and the /memory page need no changes — and the live
+    call path keeps reading one cell instead of replaying the ledger.
+    """
+    ensure_schema()
+    ws = _users_ws()
+    row_idx, header, row = _find_row(ws, firebase_uid)
+    if not row_idx:
+        return False
+    updates = {
+        "long_term_memory": json.dumps(view, ensure_ascii=False),
+        "open_loops": json.dumps(open_loops, ensure_ascii=False),
+        "last_session_summary": session_summary,
+        "last_session_at": ended_at,
+    }
+    if bump_count:
+        updates["session_count"] = int(_cell(header, row, "session_count") or 0) + 1
     if session_type == "onboarding":
         updates["onboarding_call_done"] = "TRUE"
     batch = [

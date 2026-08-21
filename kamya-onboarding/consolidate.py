@@ -1,288 +1,122 @@
-"""End-of-session memory consolidation (Step-3 architecture).
+"""End-of-session memory consolidation — PATCH based.
 
-Runs ONCE when a call ends, off the audio path. Takes the user's EXISTING
-long-term memory plus the transcript of the call that just happened, and asks a
-Groq model to return the UPDATED (cumulative) memory + a session summary +
-open loops to follow up on next time.
+Runs ONCE when a call ends, off the audio path.
 
-Cumulative rule: the model is told to keep everything still true, add new
-durable facts, update changed ones, and drop only what was contradicted.
+The model does NOT write memory. It proposes a PATCH: a list of set / append /
+invalidate operations, each carrying the user's own words as evidence.
+`memory_facts` then validates every operation against a fixed schema and
+applies it in code.
 
-Open loops are MERGED (not regenerated): the existing open loops are passed in,
-and the model removes only the ones this conversation resolved, keeps the rest
-(even if not discussed this session), and adds any new follow-ups.
+Why it changed: the model used to return the whole 12-section document and we
+stored whatever came back. A section it forgot to copy through was silently
+lost, and a hallucinated fact became next call's ground truth with no way to
+trace it. Emitting a patch makes both impossible — an op naming an unknown
+path, or citing a quote absent from the transcript, is rejected and recorded
+rather than absorbed.
 
-Uses a small/cheap Groq model by default (GROQ_CONSOLIDATION_MODEL) so this
-background step doesn't eat the conversation model's daily token budget.
+Open loops are still returned whole (a short list of strings, cheap to
+regenerate and not part of the fact ledger).
+
+Uses GROQ_CONSOLIDATION_MODEL so this background step doesn't eat the
+conversation model's token budget.
 """
 import json
 import os
 
 from groq import Groq
 
-# llama-3.1-8b-instant was decommissioned 2026-08-16. Its drop-in replacement
-# (gpt-oss-20b) fails this prompt with json_validate_failed and an empty
-# generation, so consolidation silently lost the whole memory write. The 120b
-# follows the strict schema reliably. This runs once, after hangup — latency
-# doesn't matter here, correctness does.
+import memory_facts
+
+# llama-3.1-8b-instant was decommissioned 2026-08-16, and its drop-in
+# replacement (gpt-oss-20b) fails this task with json_validate_failed and an
+# empty generation. The 120b follows a strict schema reliably. This runs once,
+# after hangup — latency doesn't matter here, correctness does.
 _MODEL = os.getenv("GROQ_CONSOLIDATION_MODEL", "openai/gpt-oss-120b")
 
-_SYSTEM = """\
-You maintain the long-term memory of a user for Mira, an AI dietician focused on Indian users.
+_PATHS_BLOCK = "\n".join(
+    f"  {p:44s} {t}" for p, t in sorted(memory_facts.SCHEMA.items())
+)
 
-You receive: the user's EXISTING long-term memory (JSON), the EXISTING open loops, and the TRANSCRIPT of the conversation that just happened.
+_SYSTEM = f"""\
+You maintain the long-term memory of a user for Mira, an AI dietician for Indian users.
 
-Produce the UPDATED long_term_memory JSON.
+You are given the user's CURRENT MEMORY, their EXISTING OPEN LOOPS, and the
+TRANSCRIPT of the call that just ended.
 
-## MASTER RULE
+You do NOT rewrite memory. You propose a PATCH describing only what CHANGED.
 
-Your DEFAULT action is KEEP. Every single field and array item in the existing memory MUST appear in your output unless the user EXPLICITLY contradicted it. Forgetting to include something = deleting it. When in doubt, KEEP it.
+OUTPUT — valid JSON, exactly this shape:
+{{
+  "ops": [
+    {{"op": "set",        "path": "<path>", "value": <value>, "evidence": "<user's words>", "confidence": "high|medium|low"}},
+    {{"op": "append",     "path": "<path>", "value": <value>, "evidence": "<user's words>", "confidence": "high|medium|low"}},
+    {{"op": "invalidate", "path": "<path>", "reason": "<why it is no longer true>", "evidence": "<user's words>"}}
+  ],
+  "session_summary": "1-2 sentences on what happened this call",
+  "open_loops": ["follow-up for next call", "..."]
+}}
 
-## OPERATIONS
+OPERATIONS
+  set         Replace a single-valued field. Use when a value CHANGED or is new.
+  append      Add one item to a list field. Use for a NEW item only.
+  invalidate  The user contradicted something already in memory. The old value
+              is preserved and closed off — never removed.
 
-- ADD: new durable fact learned in this conversation that does not exist yet.
-- UPDATE: a fact that changed — replace the old value (e.g. weight went from 74 to 72).
-- DROP: ONLY when the user explicitly contradicted something (e.g. "I actually like oats now" → remove from dislikes, add to likes).
-- KEEP: everything not discussed stays EXACTLY as is. If the user talked about food and never mentioned health, every health field must come back unchanged.
+HARD RULES
+  1. Emit an op ONLY for something this transcript establishes. If a fact is
+     already in CURRENT MEMORY and unchanged, emit NOTHING for it. Silence
+     means "still true" — memory is cumulative and nothing is lost by omission.
+  2. `evidence` MUST quote or closely paraphrase what the USER actually said.
+     It is checked against the transcript. If you cannot ground it, omit the op.
+  3. `path` MUST be one of the paths listed below. Never invent a path.
+  4. Durable facts only. "I ate poha today" is an event, not memory. "I eat
+     poha most mornings" is memory.
+  5. Never infer medical facts. A condition, medication or allergy needs the
+     user to have stated it.
+  6. If the user contradicts a stored fact, use `invalidate` (or `set` for a
+     single-valued field), never a silent overwrite.
+  7. An empty "ops" list is a perfectly good answer for a short call.
 
-## WHAT TO STORE vs IGNORE
+CONFIDENCE
+  high    the user stated it plainly
+  medium  clearly implied
+  low     uncertain — still emit it, we track the weakness
 
-STORE — durable facts that help Mira give better advice in future sessions:
-- Health conditions, medications, allergies (safety-critical — never miss these)
-- Diet type, restrictions, eating patterns
-- Food likes and dislikes
-- Goals, motivation, targets
-- Lifestyle context (schedule, cooking situation, household, budget)
-- Progress signals (what worked, what failed, recurring struggles)
-- Specific advice Mira gave and user's reaction to it (goes in entities)
+ALLOWED PATHS (name, then kind)
+{_PATHS_BLOCK}
 
-IGNORE — do not store any of these:
-- One-off food events ("I ate pizza today") — UNLESS user mentions it repeatedly across calls
-- Greetings, small talk, filler ("accha", "hmm", "ok ok")
-- Anything temporary that won't matter next session
+  scalar   one value       -> use `set`
+  list     list of strings -> use `append` (one op per new item)
+  objlist  list of objects -> use `append`
+           health.medications items: {{"name","dosage","timing","frequency"}}
+           entities items:           {{"type","what","status","given_on"}}
+           entities.status is one of: suggested | trying | following | absorbed
 
-Keep all entries as SHORT PHRASES, not full sentences.
+MEAL SLOTS under current_pattern: morning, mid_morning, lunch, evening,
+dinner, late_night. `.time` and `.note` are scalars; `.frequent` and `.gaps`
+are lists.
 
-## KEY-BY-KEY UPDATE RULES
-
-### identity.basics (age, gender, city)
-- UPDATE only when user explicitly states a new value ("I moved to Mumbai").
-- These rarely change. If not discussed, KEEP as is.
-
-### identity.body (height_cm, weight_kg)
-- weight_kg: UPDATE whenever user reports a new weight. This is expected to change.
-- height_cm: Almost never changes for adults. Update only if corrected.
-
-### health.conditions (array of strings)
-- SAFETY-CRITICAL. Never drop a condition unless user says "I was misdiagnosed" or similar.
-- ADD any new condition mentioned ("doctor ne bola thyroid hai").
-- Keep as short labels: "Type 2 diabetes", "PCOS", "hypothyroid", etc.
-
-### health.medications (array of objects: {name, dosage, timing, frequency})
-- Each medication is an object, NOT a plain string.
-- ADD when user mentions a new medication.
-- UPDATE when dosage/timing changes ("doctor ne dose badha diya").
-- DROP only if user says they stopped a medication ("metformin band kar diya").
-- If user mentions a medication name but not dosage/timing, store what you know, leave rest null.
-- Example: {"name": "metformin", "dosage": "500mg", "timing": "after meals", "frequency": "2x/day"}
-
-### health.allergies (array of strings)
-- SAFETY-CRITICAL. Never drop unless explicitly corrected.
-- ADD any allergy or intolerance mentioned.
-
-### diet.type (string)
-- Overall diet label: "vegetarian", "eggetarian", "non-veg", "vegan", "Jain", etc.
-- UPDATE only if user explicitly changes ("I started eating eggs").
-
-### diet.restrictions (array of strings)
-- Religious, medical, or personal restrictions: "no onion-garlic", "Navratri fasting", "no beef".
-- ADD new restrictions. DROP only if user says they stopped following one.
-
-### current_pattern (object with 6 meal slots)
-- Each slot: morning, mid_morning, lunch, evening, dinner, late_night
-- Each slot has: {time, frequent, note, gaps}
-  - time (string): when this meal usually happens ("8am", "late around 10:30pm"). Update when user gives timing info.
-  - frequent (array of strings): foods the user REGULARLY eats at this slot. NOT one-off meals.
-    - ADD a food ONLY when user says they eat it regularly ("roz poha khati hoon") or mentions it across 2+ conversations.
-    - Do NOT add one-off events ("aaj pizza khaya" → ignore).
-    - DROP when user says they stopped eating something regularly.
-  - note (string): contextual info that doesn't fit a list item. "mom cooks", "heaviest meal", "skips 3 days/week".
-  - gaps (array of strings): specific questions Mira still needs to ask about this meal slot.
-    - ADD a gap when Mira asked something and the user didn't answer, deflected, or gave a vague answer.
-    - REMOVE a gap when the user answered it in this conversation — move the answer into frequent/time/note.
-    - Only add USEFUL gaps: "portion size?" is good. "what brand of atta?" is not useful.
-    - Examples: "how many rotis?", "with sugar or without?", "portion of rice?"
-
-### preferences.likes (array of strings)
-- Foods the user enjoys. ADD when user expresses liking. DROP if moved to dislikes.
-
-### preferences.dislikes (array of strings)
-- Foods the user refuses or dislikes. ADD when user rejects something.
-- IMPORTANT: if user says they now like something that was in dislikes, DROP from dislikes and ADD to likes.
-
-### preferences.cuisine (string)
-- Household cooking style: "Punjabi", "South Indian", "Gujarati", "mixed North Indian", etc.
-
-### goals.primary_goal (string)
-- Main objective: "lose 8kg", "manage blood sugar", "gain muscle", etc. UPDATE if goal changes.
-
-### goals.motivation (string)
-- Why they want this: "wedding in 4 months", "doctor said to lose weight", "want to feel energetic".
-
-### goals.target (string)
-- Specific target: "65kg", "HbA1c under 7", "fit in old clothes". UPDATE when user revises.
-
-### lifestyle (schedule, cooking_situation, household, budget)
-- schedule: work hours, sleep pattern ("night shifts, sleeps 2am").
-- cooking_situation: who cooks, how ("mom cooks", "I cook on weekends", "mostly outside food").
-- household: family context ("joint family, 5 people", "lives alone").
-- budget: food budget level ("tight", "moderate", "not a concern").
-- These change rarely. UPDATE only when user reports a change.
-
-### progress.what_worked (array of strings)
-- Things the user tried AND liked/continued. Short phrases: "poha breakfast — liked it".
-- ADD when user reports positive results. Do NOT add Mira's suggestions — only what the USER confirmed worked.
-- When an entity (advice/meal plan) gets positive user feedback, absorb it here.
-
-### progress.what_failed (array of strings)
-- Things the user tried AND quit/hated. "oats — hated, quit in 2 days".
-- CRITICAL: Mira must never re-suggest these. ADD immediately when user reports failure.
-
-### progress.struggles (array of strings)
-- Recurring problems: "stress eating at night", "can't reduce chai", "skips breakfast".
-- ADD new struggles. DROP only if user reports it's resolved ("ab raat ko nahi khati").
-
-### entities (array of objects)
-- Track SPECIFIC advice/plans Mira gave and what happened with them.
-- Each entity: {"type": "...", "what": "...", "status": "...", "given_on": "..."}
-  - type: "meal_plan", "advice", "food_swap", "meal_rotation", "habit_suggestion"
-  - what: the specific recommendation in short form
-  - status: "suggested", "trying", "following", "liked", "quit", "partially following"
-  - given_on: date it was first given
-- ADD when Mira gives a specific, actionable recommendation in THIS conversation.
-- UPDATE status when user reports feedback on an existing entity.
-- When an entity has been resolved (user clearly adopted it or abandoned it for 2+ sessions), absorb into progress.what_worked or progress.what_failed, then DROP the entity.
-- Keep MAX 7 entities. If over 7, absorb the oldest resolved ones into progress.
-
-### recent_exchanges (array of {role, text})
-- The last 5-6 meaningful exchanges from THIS conversation (not older ones).
-- REPLACE entirely each session — these are always from the MOST RECENT call only.
-- Pick the most informative exchanges, skip filler ("hmm", "ok", "accha").
-- Each entry: {"role": "user" or "assistant", "text": "short version of what was said"}
-- Keep text SHORT — compress to the key content, not verbatim quotes.
-
-### interaction_meta
-- total_sessions: INCREMENT by 1 each call (existing value + 1).
-- first_session: SET only if currently null (first ever call). Never change after that.
-- last_session: SET to today's date (the model can infer from transcript context or use the existing value + 1 day if unclear).
-- mood_last_call: user's emotional state THIS call. "happy", "frustrated", "neutral", "motivated", "anxious", etc. Infer from tone/content. Replace each session.
-
-### misc (array of strings)
-- Important facts that don't fit any category. Use sparingly.
-- Examples: "afraid of needles", "traveling next week — diet will be disrupted".
-- DROP items that are no longer relevant (trip that ended, temporary situation resolved).
-
-## open_loops rules
-
-VERY IMPORTANT — start from the EXISTING open loops, do not regenerate from scratch.
-
-- REMOVE an existing open loop ONLY if this conversation clearly RESOLVED or answered it.
-- KEEP every existing open loop that is still unresolved — even if it was NOT mentioned in this conversation. Never drop a loop just because it did not come up this time.
-- ADD new follow-ups discovered in this conversation.
-- Do NOT duplicate loops that mean the same thing.
-- Return the FULL updated list = (kept unresolved) + (new), with resolved ones removed.
-
-## OUTPUT — return STRICT JSON only (no prose, no markdown), exactly this shape:
-
-{
-  "long_term_memory": {
-    "identity": {
-      "basics": { "age": null, "gender": null, "city": null },
-      "body": { "height_cm": null, "weight_kg": null }
-    },
-    "health": {
-      "conditions": [],
-      "medications": [],
-      "allergies": []
-    },
-    "diet": {
-      "type": null,
-      "restrictions": []
-    },
-    "current_pattern": {
-      "morning":     { "time": null, "frequent": [], "note": null, "gaps": [] },
-      "mid_morning": { "time": null, "frequent": [], "note": null, "gaps": [] },
-      "lunch":       { "time": null, "frequent": [], "note": null, "gaps": [] },
-      "evening":     { "time": null, "frequent": [], "note": null, "gaps": [] },
-      "dinner":      { "time": null, "frequent": [], "note": null, "gaps": [] },
-      "late_night":  { "time": null, "frequent": [], "note": null, "gaps": [] }
-    },
-    "preferences": {
-      "likes": [],
-      "dislikes": [],
-      "cuisine": null
-    },
-    "goals": {
-      "primary_goal": null,
-      "motivation": null,
-      "target": null
-    },
-    "lifestyle": {
-      "schedule": null,
-      "cooking_situation": null,
-      "household": null,
-      "budget": null
-    },
-    "progress": {
-      "what_worked": [],
-      "what_failed": [],
-      "struggles": []
-    },
-    "entities": [],
-    "recent_exchanges": [],
-    "interaction_meta": {
-      "total_sessions": 0,
-      "first_session": null,
-      "last_session": null,
-      "mood_last_call": null
-    },
-    "misc": []
-  },
-  "session_summary": "one or two sentence recap of THIS conversation",
-  "open_loops": ["concrete things Mira should follow up on next time"]
-}
-
-Leave fields as null or [] when no information is available — do NOT guess or invent."""
+OPEN LOOPS — return the FULL list, merged: drop the ones this call resolved,
+keep the ones still outstanding (even if not discussed), add anything new.
+Never regenerate from scratch."""
 
 
 class ConsolidationError(RuntimeError):
     """The model's response was unusable. Carries the reason for a repair retry."""
 
 
-def _leaf_count(obj) -> int:
-    """Count non-empty leaf values in a nested dict/list — a crude 'how much do
-    we know about this user' measure, used to detect destructive merges."""
-    if obj is None or obj == "" or obj == [] or obj == {}:
-        return 0
-    if isinstance(obj, dict):
-        return sum(_leaf_count(v) for v in obj.values())
-    if isinstance(obj, list):
-        return sum(_leaf_count(v) for v in obj)
-    return 1
-
-
-def _validate(data, existing_memory: dict) -> dict:
-    """Return the normalised result, or raise ConsolidationError.
-
-    Guards against the two ways a bad response silently destroys memory:
-    a wrong-shaped payload, and a payload that drops most of what we knew.
-    """
+def _validate_patch(data) -> dict:
+    """Shape-check the patch envelope. Per-op validation lives in memory_facts."""
     if not isinstance(data, dict):
         raise ConsolidationError("top level is not a JSON object")
 
-    ltm = data.get("long_term_memory")
-    if not isinstance(ltm, dict):
-        raise ConsolidationError("`long_term_memory` is missing or not an object")
+    ops = data.get("ops", [])
+    if ops is None:
+        ops = []
+    if not isinstance(ops, list):
+        raise ConsolidationError("`ops` must be a list")
+    if not all(isinstance(o, dict) for o in ops):
+        raise ConsolidationError("every entry in `ops` must be an object")
 
     loops = data.get("open_loops", [])
     if loops is None:
@@ -294,42 +128,26 @@ def _validate(data, existing_memory: dict) -> dict:
     if not isinstance(summary, str):
         raise ConsolidationError("`session_summary` must be a string")
 
-    # Non-destructive guard. Memory is cumulative by design, so a merge that
-    # halves what we knew is a model error, not a real update. Only applies
-    # once there is something meaningful to lose.
-    before = _leaf_count(existing_memory or {})
-    after = _leaf_count(ltm)
-    if before >= 6 and after < before * 0.5:
-        raise ConsolidationError(
-            f"destructive merge rejected: {before} known facts -> {after}. "
-            "Memory is cumulative — copy every existing field through unless "
-            "the transcript explicitly contradicts it."
-        )
-
     return {
-        "long_term_memory": ltm,
+        "ops": ops,
         "session_summary": summary.strip(),
-        "open_loops": loops,
+        "open_loops": [str(x) for x in loops if str(x).strip()],
     }
 
 
-def consolidate(existing_memory: dict, existing_open_loops: list, transcript: str,
-                attempts: int = 3) -> dict:
-    """Return {long_term_memory, session_summary, open_loops}.
+def consolidate_patch(current_view: dict, existing_open_loops: list,
+                      transcript: str, attempts: int = 3) -> dict:
+    """Ask the model for a PATCH. Returns {ops, session_summary, open_loops}.
 
-    Retries with the validation error fed back to the model, because the
-    observed failures are recoverable: a 400 json_validate_failed with an empty
-    generation, or a structurally wrong payload. Raises ConsolidationError if
-    every attempt fails — the caller keeps the stored transcript and the session
-    stays replayable.
-
-    `existing_open_loops` is the user's current open loops; the model merges them
-    with this conversation (removes resolved, keeps unresolved, adds new).
+    Retries with the rejection reason fed back, because the observed failures
+    are recoverable (empty generation, malformed JSON). Raises
+    ConsolidationError once attempts are exhausted — the caller keeps the
+    stored transcript, so the session stays replayable.
     """
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     base_msg = (
-        "EXISTING MEMORY:\n"
-        + json.dumps(existing_memory or {}, ensure_ascii=False)
+        "CURRENT MEMORY:\n"
+        + json.dumps(current_view or {}, ensure_ascii=False)
         + "\n\nEXISTING OPEN LOOPS:\n"
         + json.dumps(existing_open_loops or [], ensure_ascii=False)
         + "\n\nTRANSCRIPT:\n"
@@ -358,7 +176,7 @@ def consolidate(existing_memory: dict, existing_open_loops: list, transcript: st
             content = (resp.choices[0].message.content or "").strip()
             if not content:
                 raise ConsolidationError("model returned an empty response")
-            return _validate(json.loads(content), existing_memory or {})
+            return _validate_patch(json.loads(content))
         except Exception as exc:  # API errors, JSON errors, validation errors
             last_error = f"{type(exc).__name__}: {exc}"[:400]
             print(f"[consolidate] attempt {attempt}/{attempts} failed: {last_error}",

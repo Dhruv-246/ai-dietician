@@ -94,6 +94,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 import consolidate
+import memory_facts
 import memory_store
 import onboarding_nodes
 import rag
@@ -870,22 +871,62 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         if stored:
             try:
                 _log(f"consolidating room={room_name} session={run_id} turns={user_turns}")
-                result = consolidate.consolidate(
-                    existing_memory or {}, existing_open_loops or [], transcript)
-                memory_store.save_user_memory(
-                    firebase_uid=firebase_uid, session_type=mode, ended_at=ended_at,
-                    merged_memory=result["long_term_memory"],
-                    session_summary=result["session_summary"],
-                    open_loops=result["open_loops"],
+
+                # The ledger is the source of truth. On first use for a user who
+                # already has a pre-ledger memory document, seed it so nobody
+                # starts from empty.
+                facts = memory_store.load_facts(firebase_uid)
+                if not facts and (existing_memory or {}):
+                    seed_rows, _, _ = memory_facts.apply_patch(
+                        [], memory_facts.seed_ops_from_document(existing_memory),
+                        "migration", "", when=ended_at,
+                        firebase_uid=firebase_uid, user_id=user_id)
+                    memory_store.append_facts(seed_rows)
+                    facts = seed_rows
+                    _log(f"ledger seeded from legacy memory session={run_id} "
+                         f"facts={len(seed_rows)}")
+
+                current_view = memory_facts.build_current_view(facts)
+
+                # The model proposes; the code decides.
+                patch = consolidate.consolidate_patch(
+                    current_view, existing_open_loops or [], transcript)
+                new_rows, invalidations, audit = memory_facts.apply_patch(
+                    facts, patch["ops"], run_id, transcript, when=ended_at,
+                    firebase_uid=firebase_uid, user_id=user_id)
+
+                memory_store.append_facts(new_rows)
+                memory_store.stamp_invalidations(invalidations, ended_at)
+
+                # Reflect the invalidations locally so the projection is correct
+                # without re-reading the sheet.
+                closed_by = dict(invalidations)
+                for f in facts:
+                    if f.get("fact_id") in closed_by:
+                        f["invalidated_at"] = ended_at
+                        f["invalidated_by"] = closed_by[f["fact_id"]]
+                view = memory_facts.build_current_view(facts + new_rows)
+
+                memory_store.cache_current_view(
+                    firebase_uid=firebase_uid, view=view,
+                    open_loops=patch["open_loops"],
+                    session_summary=patch["session_summary"],
+                    ended_at=ended_at, session_type=mode,
                 )
                 memory_store.finalize_session(
                     run_id, status=memory_store.STATUS_DONE,
-                    session_summary=result["session_summary"],
-                    open_loops=result["open_loops"],
+                    session_summary=patch["session_summary"],
+                    open_loops=patch["open_loops"],
                     consolidated_at=datetime.now(timezone.utc).isoformat(),
                 )
+                applied = sum(1 for a in audit if a.get("applied"))
+                rejected = len(audit) - applied
+                for a in audit:
+                    if not a.get("applied") and a.get("reason") not in ("unchanged", "duplicate"):
+                        _log(f"  op REJECTED {a.get('op')} {a.get('path')}: {a.get('reason')}")
                 _log(f"memory saved room={room_name} session={run_id} "
-                     f"open_loops={len(result['open_loops'])}")
+                     f"ops={len(patch['ops'])} applied={applied} rejected={rejected} "
+                     f"closed={len(invalidations)} open_loops={len(patch['open_loops'])}")
             except Exception as exc:
                 _log(f"consolidation failed room={room_name} session={run_id} "
                      f"(transcript kept, replayable): {exc}")
@@ -1000,28 +1041,53 @@ def _reprocess_sync(session_id=None, limit=10):
                             "error": "no firebase_uid on row"})
             continue
         try:
+            when = r["ended_at"] or datetime.now(timezone.utc).isoformat()
             mem = memory_store.load_memory(uid)
-            result = consolidate.consolidate(
-                mem.get("long_term_memory") or {},
+            facts = memory_store.load_facts(uid)
+            if not facts and (mem.get("long_term_memory") or {}):
+                seed_rows, _, _ = memory_facts.apply_patch(
+                    [], memory_facts.seed_ops_from_document(mem["long_term_memory"]),
+                    "migration", "", when=when, firebase_uid=uid,
+                    user_id=r["user_id"])
+                memory_store.append_facts(seed_rows)
+                facts = seed_rows
+
+            patch = consolidate.consolidate_patch(
+                memory_facts.build_current_view(facts),
                 mem.get("open_loops") or [],
                 r["transcript"],
             )
-            memory_store.save_user_memory(
-                firebase_uid=uid, session_type=r["type"],
-                ended_at=r["ended_at"] or datetime.now(timezone.utc).isoformat(),
-                merged_memory=result["long_term_memory"],
-                session_summary=result["session_summary"],
-                open_loops=result["open_loops"],
+            new_rows, invalidations, audit = memory_facts.apply_patch(
+                facts, patch["ops"], sid, r["transcript"], when=when,
+                firebase_uid=uid, user_id=r["user_id"])
+            memory_store.append_facts(new_rows)
+            memory_store.stamp_invalidations(invalidations, when)
+
+            closed_by = dict(invalidations)
+            for f in facts:
+                if f.get("fact_id") in closed_by:
+                    f["invalidated_at"] = when
+                    f["invalidated_by"] = closed_by[f["fact_id"]]
+
+            memory_store.cache_current_view(
+                firebase_uid=uid,
+                view=memory_facts.build_current_view(facts + new_rows),
+                open_loops=patch["open_loops"],
+                session_summary=patch["session_summary"],
+                ended_at=when, session_type=r["type"],
             )
             memory_store.finalize_session(
                 sid, status=memory_store.STATUS_DONE,
-                session_summary=result["session_summary"],
-                open_loops=result["open_loops"],
+                session_summary=patch["session_summary"],
+                open_loops=patch["open_loops"],
                 consolidated_at=datetime.now(timezone.utc).isoformat(),
             )
-            _log(f"reprocessed session={sid} open_loops={len(result['open_loops'])}")
-            results.append({"session_id": sid, "ok": True,
-                            "open_loops": len(result["open_loops"])})
+            applied = sum(1 for a in audit if a.get("applied"))
+            _log(f"reprocessed session={sid} applied={applied}/{len(audit)} "
+                 f"closed={len(invalidations)}")
+            results.append({"session_id": sid, "ok": True, "applied": applied,
+                            "rejected": len(audit) - applied,
+                            "open_loops": len(patch["open_loops"])})
         except Exception as exc:
             try:
                 memory_store.finalize_session(
@@ -1031,6 +1097,60 @@ def _reprocess_sync(session_id=None, limit=10):
             _log(f"reprocess failed session={sid}: {exc}")
             results.append({"session_id": sid, "ok": False, "error": str(exc)[:300]})
     return results
+
+
+@app.get("/audit")
+async def audit(request: Request):
+    """Why does Mira believe this? The full fact ledger for one user.
+
+    ?uid=<firebase_uid>          every fact-version, newest first
+    &path=diet.type              narrow to one field's timeline
+    &include_rejected=0          hide refused claims (default shows them)
+
+    Each row carries the evidence the model cited, the session it came from,
+    when it became true, and when/what superseded it.
+    """
+    uid = (request.query_params.get("uid") or "").strip()
+    if not uid:
+        return JSONResponse({"error": "pass ?uid=<firebase_uid>"}, status_code=400)
+    path = (request.query_params.get("path") or "").strip() or None
+    show_rejected = (request.query_params.get("include_rejected") or "1") != "0"
+    try:
+        facts = await asyncio.to_thread(memory_store.load_facts, uid)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    rows = memory_facts.history_for(facts, path)
+    if not show_rejected:
+        rows = [r for r in rows if r.get("status") == memory_facts.STATUS_APPLIED]
+
+    live = memory_facts.live_facts(facts)
+    return {
+        "uid": uid,
+        "path": path,
+        "totals": {
+            "ledger_rows": len(facts),
+            "live_facts": len(live),
+            "superseded": sum(1 for f in facts
+                              if str(f.get("invalidated_at", "")).strip()),
+            "rejected": sum(1 for f in facts
+                            if f.get("status") == memory_facts.STATUS_REJECTED),
+        },
+        "current_view": memory_facts.build_current_view(facts),
+        "history": [
+            {
+                "fact_id": r.get("fact_id"), "path": r.get("path"),
+                "op": r.get("op"), "value": r.get("value"),
+                "status": r.get("status"), "confidence": r.get("confidence"),
+                "evidence": r.get("evidence"), "session_id": r.get("session_id"),
+                "valid_from": r.get("valid_from"),
+                "invalidated_at": r.get("invalidated_at"),
+                "invalidated_by": r.get("invalidated_by"),
+                "reason": r.get("reason"),
+            }
+            for r in rows[:400]
+        ],
+    }
 
 
 @app.post("/reprocess")
