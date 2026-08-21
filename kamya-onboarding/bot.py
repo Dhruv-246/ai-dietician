@@ -1199,6 +1199,7 @@ async def memory_view(request: Request):
 
 async def _memory_view_inner(request, uid):
     import html as _html
+    import json as _json
 
     mem = memory_store.load_memory(uid)
     user_id = mem.get("user_id", "")
@@ -1209,6 +1210,10 @@ async def _memory_view_inner(request, uid):
     name = profile.get("name") or "This user"
     ltm = mem.get("long_term_memory") or {}
     sessions = memory_store.get_sessions(user_id) if user_id else []
+    try:
+        facts = memory_store.load_facts(uid)
+    except Exception:
+        facts = []
 
     def esc(x):
         return _html.escape(str(x))
@@ -1218,6 +1223,122 @@ async def _memory_view_inner(request, uid):
         if not items:
             return "<p class='empty'>— nothing yet —</p>"
         return "<ul>" + "".join(f"<li>{esc(i)}</li>" for i in items) + "</ul>"
+
+    def fval(raw):
+        """Ledger values are JSON-encoded; render them readably."""
+        if raw in (None, ""):
+            return "—"
+        try:
+            v = _json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            return str(raw)
+        if isinstance(v, (dict, list)):
+            return _json.dumps(v, ensure_ascii=False)
+        return str(v)
+
+    def conf_pill(conf):
+        c = (conf or "").strip().lower()
+        cls = {"high": "conf-high", "medium": "conf-medium",
+               "low": "conf-low", "migrated": "conf-mig"}.get(c, "conf-low")
+        return f"<span class='pill {cls}'>{esc(c or 'unknown')}</span>" if c else ""
+
+    def when(ts):
+        return esc((ts or "")[:16].replace("T", " ")) or "—"
+
+    def prov_line(f):
+        """session + timestamp + confidence — the 'where did this come from' line."""
+        sid = f.get("session_id") or "—"
+        bits = [f"<span class='rid-inline'>{esc(sid)}</span>",
+                f"<span>{when(f.get('valid_from') or f.get('created_at'))}</span>"]
+        cp = conf_pill(f.get("confidence"))
+        if cp:
+            bits.append(cp)
+        return "<div class='prov'>" + " · ".join(bits) + "</div>"
+
+    def quote(f):
+        ev = (f.get("evidence") or "").strip()
+        if not ev:
+            return ""
+        return f"<div class='quote'>“{esc(ev)}”</div>"
+
+    def provenance_html(all_facts):
+        """Every fact Mira currently believes, with its source. Grouped by section."""
+        live = [f for f in memory_facts.live_facts(all_facts)
+                if f.get("op") != memory_facts.OP_INVALIDATE]
+        if not live:
+            return "<p class='empty'>— no facts recorded yet (populates after the next call) —</p>"
+        groups = {}
+        for f in live:
+            groups.setdefault((f.get("path") or "").split(".")[0], []).append(f)
+        out = []
+        for section in sorted(groups):
+            out.append(f"<h3>{esc(section.replace('_', ' '))}</h3>")
+            for f in groups[section]:
+                out.append(
+                    "<div class='fact'>"
+                    f"<div class='fact-head'><code class='fact-path'>{esc(f.get('path'))}</code>"
+                    f"<span class='fact-val'>{esc(fval(f.get('value')))}</span></div>"
+                    + quote(f) + prov_line(f) +
+                    "</div>"
+                )
+        return "".join(out)
+
+    def changed_html(all_facts):
+        """Facts that were true and no longer are — kept, never deleted."""
+        closed = [f for f in (all_facts or [])
+                  if str(f.get("invalidated_at") or "").strip()
+                  and f.get("status") == memory_facts.STATUS_APPLIED]
+        if not closed:
+            return "<p class='empty'>— nothing has changed yet —</p>"
+        closed.sort(key=lambda f: str(f.get("invalidated_at")), reverse=True)
+        by_id = {f.get("fact_id"): f for f in (all_facts or [])}
+        out = []
+        for f in closed:
+            repl = by_id.get(f.get("invalidated_by")) or {}
+            new_val = fval(repl.get("value")) if repl.get("value") else None
+            if repl.get("op") == memory_facts.OP_INVALIDATE or not new_val:
+                right = "<span class='fact-val removed'>no longer tracked</span>"
+            else:
+                right = f"<span class='fact-val'>{esc(new_val)}</span>"
+            out.append(
+                "<div class='fact'>"
+                f"<div class='fact-head'><code class='fact-path'>{esc(f.get('path'))}</code></div>"
+                "<div class='change'>"
+                f"<span class='fact-val old'>{esc(fval(f.get('value')))}</span>"
+                f"<span class='arrow'>→</span>{right}</div>"
+                + quote(repl)
+                + (f"<div class='reason'>{esc(repl.get('reason'))}</div>"
+                   if (repl.get('reason') or '').strip() else "")
+                + "<div class='prov'>was true "
+                f"<span>{when(f.get('valid_from') or f.get('created_at'))}</span>"
+                f" → <span>{when(f.get('invalidated_at'))}</span> · changed in "
+                f"<span class='rid-inline'>{esc(repl.get('session_id') or '—')}</span></div>"
+                "</div>"
+            )
+        return "".join(out)
+
+    def rejected_html(all_facts):
+        """Claims the model proposed that validation refused. Kept as an audit trail."""
+        rej = [f for f in (all_facts or [])
+               if f.get("status") == memory_facts.STATUS_REJECTED]
+        if not rej:
+            return "<p class='empty'>— nothing has been rejected —</p>"
+        rej.sort(key=lambda f: str(f.get("created_at")), reverse=True)
+        out = []
+        for f in rej:
+            out.append(
+                "<div class='fact rej'>"
+                f"<div class='fact-head'><code class='fact-path'>{esc(f.get('path') or '?')}</code>"
+                f"<span class='fact-val'>{esc(fval(f.get('value')))}</span></div>"
+                f"<div class='reason warn'>blocked: {esc(f.get('reason') or 'unknown')}</div>"
+                + quote(f) +
+                "<div class='prov'>"
+                f"<span class='rid-inline'>{esc(f.get('session_id') or '—')}</span> · "
+                f"<span>{when(f.get('created_at'))}</span> · "
+                f"<span>op: {esc(f.get('op') or '?')}</span></div>"
+                "</div>"
+            )
+        return "".join(out)
 
     def kv_table(obj, highlight_keys=None):
         """Render a dict as a compact key-value list."""
@@ -1443,6 +1564,16 @@ async def _memory_view_inner(request, uid):
     except Exception:
         prompt_text = "(prompt file not found)"
 
+    _live_facts = [f for f in memory_facts.live_facts(facts)
+                   if f.get("op") != memory_facts.OP_INVALIDATE]
+    _closed_facts = [f for f in facts if str(f.get("invalidated_at") or "").strip()
+                     and f.get("status") == memory_facts.STATUS_APPLIED]
+    _rej_facts = [f for f in facts if f.get("status") == memory_facts.STATUS_REJECTED]
+    _sessions_seen = len({f.get("session_id") for f in facts if f.get("session_id")})
+    prov_block = provenance_html(facts)
+    changed_block = changed_html(facts)
+    rejected_block = rejected_html(facts)
+
     page = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mira's memory — {esc(name)}</title>
@@ -1493,6 +1624,36 @@ async def _memory_view_inner(request, uid):
   .exchange .role{{font-weight:700;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-right:6px;}}
   .exchange.user .role{{color:var(--accent-fg);}}
   .exchange.mira .role{{color:#1a6b1a;}}
+  /* --- fact ledger: provenance / history / rejected --- */
+  .fact{{padding:9px 0;border-bottom:1px solid var(--line);}}
+  .fact:last-child{{border-bottom:none;}}
+  .fact.rej{{opacity:.92;}}
+  .fact-head{{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap;}}
+  .fact-path{{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--muted);
+    background:#f2f6fd;border:1px solid var(--line);border-radius:5px;padding:1px 6px;white-space:nowrap;}}
+  .fact-val{{font-size:14px;font-weight:600;color:var(--ink);}}
+  .fact-val.old{{text-decoration:line-through;color:#9aa7bd;font-weight:500;}}
+  .fact-val.removed{{color:#b44;font-weight:500;font-style:italic;}}
+  .change{{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin-top:4px;}}
+  .arrow{{color:var(--accent-fg);font-weight:700;}}
+  .quote{{margin:5px 0 0;padding:3px 0 3px 10px;border-left:3px solid var(--accent-bg);
+    font-size:13px;color:var(--muted);font-style:italic;}}
+  .reason{{font-size:12.5px;color:var(--muted);margin-top:4px;}}
+  .prov{{display:flex;gap:7px;align-items:center;flex-wrap:wrap;font-size:11px;
+    color:#9aa7bd;margin-top:5px;}}
+  .rid-inline{{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:#8494ad;
+    background:#f7faff;border:1px solid var(--line);border-radius:4px;padding:1px 5px;}}
+  .prov .pill{{font-size:10px;padding:1px 7px;}}
+  .conf-high{{background:rgba(34,139,34,.12);color:#1a6b1a;}}
+  .conf-medium{{background:rgba(200,140,20,.14);color:#8a5a00;}}
+  .conf-low{{background:rgba(180,40,40,.1);color:#a22;}}
+  .conf-mig{{background:#eef1f6;color:#6b7a92;}}
+  .stats{{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:2px;}}
+  .stat{{flex:1;min-width:88px;background:#fbfdff;border:1px solid var(--line);
+    border-radius:10px;padding:9px 11px;}}
+  .stat b{{display:block;font-size:19px;letter-spacing:-.02em;}}
+  .stat span{{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}}
+  .hint{{font-size:12px;color:var(--muted);margin-bottom:8px;}}
 </style></head><body>
 <div class="wrap">
   <span class="eyebrow">Mira's memory</span>
@@ -1502,6 +1663,41 @@ async def _memory_view_inner(request, uid):
   <section>
     <h2>🧠 Long-term memory (latest)</h2>
     {ltm_html}
+  </section>
+
+  <section>
+    <h2>📊 Memory ledger</h2>
+    <p class="hint">Every fact is stored with its source and its time bounds. Nothing is ever
+      overwritten — a change closes the old fact and opens a new one.</p>
+    <div class="stats">
+      <div class="stat"><b>{len(_live_facts)}</b><span>facts held</span></div>
+      <div class="stat"><b>{len(_closed_facts)}</b><span>changed</span></div>
+      <div class="stat"><b>{len(_rej_facts)}</b><span>blocked</span></div>
+      <div class="stat"><b>{_sessions_seen}</b><span>calls</span></div>
+      <div class="stat"><b>{len(facts)}</b><span>ledger rows</span></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>🔎 Where each fact came from</h2>
+    <p class="hint">The exact words Mira heard, which call it was said in, and how confident
+      the extraction was.</p>
+    {prov_block}
+  </section>
+
+  <section>
+    <h2>🕓 What changed over time</h2>
+    <p class="hint">Previous values are kept, not deleted — so you can see how this user's
+      situation moved, and what evidence caused each change.</p>
+    {changed_block}
+  </section>
+
+  <section>
+    <h2>🚫 Claims Mira was not allowed to remember</h2>
+    <p class="hint">Proposed facts that failed validation — an unknown field, a wrong type, or
+      evidence that did not appear in the transcript. Kept so hallucinations are visible
+      rather than silent.</p>
+    {rejected_block}
   </section>
 
   <section>
