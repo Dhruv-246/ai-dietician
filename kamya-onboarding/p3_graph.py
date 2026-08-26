@@ -36,7 +36,12 @@ import rag_query
 import thread_machine as tm
 
 _ROUTER_MODEL = os.getenv("P3_ROUTER_MODEL", "openai/gpt-oss-20b")
-_ROUTER_TIMEOUT = float(os.getenv("P3_ROUTER_TIMEOUT", "3.0"))
+# Measured live: router p50 ~700-1700ms but with a long tail. At 3.0s roughly
+# one turn in six timed out, and every timeout silently became QUICK — which
+# is how an explicit "let's go back to the hunger thing" failed to RESUME.
+# 5s captures the tail. The real fix is a faster router; this stops the
+# fallback from firing on turns that would have classified correctly.
+_ROUTER_TIMEOUT = float(os.getenv("P3_ROUTER_TIMEOUT", "5.0"))
 
 _PATHS = "\n".join(f"  {p}" for p in sorted(memory_facts.SCHEMA))
 
@@ -208,7 +213,10 @@ async def _node_sense(state: ConvState) -> ConvState:
             return await asyncio.wait_for(
                 _call_router(text, threads, history), timeout=_ROUTER_TIMEOUT)
         except Exception as exc:
-            trace.append(f"router failed ({type(exc).__name__}) -> QUICK")
+            # Loud on purpose: this rate is the single most important health
+            # metric for the graph. Every one of these is a lost SWITCH/RESUME.
+            kind = "TIMEOUT" if isinstance(exc, asyncio.TimeoutError) else type(exc).__name__
+            trace.append(f"ROUTER {kind} -> degraded to QUICK (thread not advanced)")
             return {}
 
     async def _retrieve():
