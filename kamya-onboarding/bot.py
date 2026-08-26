@@ -534,12 +534,32 @@ class _CaptionObserver(BaseObserver):
             await self._send("assistant", full)
 
 
+# Deepgram Flux sends keyterms in the WEBSOCKET QUERY STRING. The full
+# stt_vocab list (140 terms, many multi-word) made a URL long enough that
+# Deepgram rejected the connection outright:
+#   ERROR FRAME: server rejected WebSocket connection: HTTP 400
+# STT then never connected, so nothing the user said was transcribed while
+# Mira still spoke her greeting normally. Default is now OFF: boosting a few
+# words is not worth risking the microphone.
+KEYTERM_LIMIT = int(os.getenv("DEEPGRAM_KEYTERM_LIMIT", "20"))
+
+
 def _stt_keyterms():
-    """Keyterms for Flux. DEEPGRAM_KEYTERMS (comma-separated) overrides."""
+    """Keyterms for Flux. OFF unless DEEPGRAM_KEYTERMS is set explicitly.
+
+    Set DEEPGRAM_KEYTERMS to a short comma-separated list and raise it
+    gradually — verify STT still connects after each increase. Curated
+    candidates live in stt_vocab.py; start with stt_vocab.CONDITIONS, which
+    is where a mis-hear costs the most.
+    """
     raw = (os.getenv("DEEPGRAM_KEYTERMS") or "").strip()
-    if raw:
-        return [t.strip() for t in raw.split(",") if t.strip()]
-    return stt_vocab.DEFAULT_KEYTERMS
+    if not raw:
+        return []
+    terms = [t.strip() for t in raw.split(",") if t.strip()]
+    if len(terms) > KEYTERM_LIMIT:
+        _log(f"keyterms truncated {len(terms)} -> {KEYTERM_LIMIT} "
+             f"(query-string length limit)")
+    return terms[:KEYTERM_LIMIT]
 
 
 def _transcript_confidence(frame):
@@ -958,7 +978,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     if _stt_engine == "deepgram" and os.getenv("DEEPGRAM_API_KEY"):
         dg_model = os.getenv("DEEPGRAM_STT_MODEL", "flux-general-multi")
         _log(f"stt=deepgram-flux model={dg_model} hints=hi,en "
-             f"keyterms={len(_stt_keyterms())} room={room_name}")
+             f"keyterms={len(_stt_keyterms()) or 'off'} room={room_name}")
         # Flux has BUILT-IN turn-taking:
         #  - End-of-turn: detects when the user is done (semantic + acoustic, incl.
         #    trailing "hmm"/pauses) -> emits final transcript so Mira replies.
@@ -981,7 +1001,9 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # vocabulary is exactly what a general model gets wrong, and a wrong
         # condition name is worse than a wrong food name. Override wholesale
         # with DEEPGRAM_KEYTERMS (comma-separated).
-        flux_kwargs["keyterm"] = _stt_keyterms()
+        _kt = _stt_keyterms()
+        if _kt:
+            flux_kwargs["keyterm"] = _kt
         # min_confidence makes Deepgram itself withhold transcripts it does not
         # believe, so garbage never enters the pipeline at all. Kept low by
         # default because dropping real speech is worse than a bad transcript;
