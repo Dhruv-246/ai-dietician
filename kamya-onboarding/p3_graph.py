@@ -68,16 +68,19 @@ LANE — the most important field. Bias toward QUICK when unsure.
   SWITCH   The user raises a NEW problem, or explicitly drops the current one.
   RESUME   The user returns to a topic that was parked earlier.
 
-needed_paths — ONLY when opening a thread (SWITCH). Choose the facts you would
-need to advise well on this problem. Choose ONLY from this list; never invent
-a path. Pick the few that matter, not everything plausible.
+needed_paths — ONLY when opening a thread (SWITCH). AT MOST 3, ordered most
+useful first. Choose ONLY from this list; never invent a path. Pick what you
+would genuinely need to advise on THIS problem — not everything plausible.
+Do NOT ask for age, gender, height or weight unless the problem is literally
+about body measurements. Prefer what and when they eat.
 {_PATHS}
 
 adhoc — only for something genuinely not covered above (e.g. "stress at work").
-Keep it to at most two.
+At most ONE. Never restate the topic itself as adhoc.
 
-extracted — anything the user just told you, keyed by the path it belongs to.
-Use a path from the list where one fits.
+extracted — anything the user JUST told you in this turn. Key it by the exact
+schema path from the list above wherever one fits — not by a made-up name.
+"सात बजे dinner करती हूँ" -> {{"current_pattern.dinner.time": "7pm"}}.
 
 sufficient — true if there is now enough to give useful advice, even if some
 details are still unknown. A good dietician acts on partial information.
@@ -155,7 +158,10 @@ def _node_safety(state: ConvState) -> ConvState:
         trace.append(f"safety HARD {name} -> fixed reply, no LLM")
         return {"safety_hit": response, "lane": tm.LANE_SAFETY, "trace": trace}
     if name in P3_SOFT_TRIGGERS:
-        trace.append(f"safety SOFT {name} -> directive, LLM still speaks")
+        # Also forced to QUICK downstream: someone saying "I feel fat" needs a
+        # human response, not a consultation that opens by asking their height
+        # and weight — which is exactly what the router did in live testing.
+        trace.append(f"safety SOFT {name} -> directive + no new thread")
         return {"safety_hit": None, "soft_safety": _SENSITIVE_DIRECTIVE, "trace": trace}
     return {"safety_hit": None, "soft_safety": None, "trace": trace}
 
@@ -220,6 +226,8 @@ async def _node_sense(state: ConvState) -> ConvState:
     lane = str(routed.get("lane", "")).upper()
     if lane not in tm.LANES:
         lane = tm.LANE_QUICK               # unclassifiable degrades to today's P-3
+    if state.get("soft_safety") and lane == tm.LANE_SWITCH:
+        lane = tm.LANE_QUICK               # acknowledge, do not start an intake
     # No thread open and the router did not open one -> nothing to advance.
     if lane in (tm.LANE_ADVANCE, tm.LANE_RESUME) and not state.get("threads"):
         lane = tm.LANE_QUICK
@@ -239,13 +247,25 @@ def _node_lane(state: ConvState) -> ConvState:
 
     if lane == tm.LANE_SWITCH:
         tm.park_active(threads)
+        # Invented paths are dropped, and the plan is capped: a longer plan
+        # cannot be satisfied inside the dwell limit, so it only guarantees an
+        # interrogation that then gets force-advanced anyway.
         needed = [p for p in (routed.get("needed_paths") or [])
-                  if p in memory_facts.SCHEMA]
+                  if p in memory_facts.SCHEMA][:tm.MAX_NEEDED_PATHS]
+        topic = str(routed.get("topic") or "this")[:60]
+        adhoc = []
+        for a in (routed.get("adhoc") or [])[:2]:
+            a = str(a)[:60].strip()
+            # Reject adhoc that is really the topic restated, or a schema path
+            # wearing a different hat.
+            if a and a not in memory_facts.SCHEMA and \
+                    not tm._tokens_of(a) <= tm._tokens_of(topic):
+                adhoc.append(a)
         th = tm.Thread(
-            topic=str(routed.get("topic") or "this")[:60],
+            topic=topic,
             template=str(routed.get("template") or "PROBLEM").upper(),
-            needed_paths=needed[:6],
-            adhoc=[str(a)[:60] for a in (routed.get("adhoc") or [])][:2],
+            needed_paths=needed,
+            adhoc=adhoc[:1],
             opened_at=int(state.get("turn_index", 0)),
         )
         threads.insert(0, th)
@@ -269,9 +289,16 @@ def _node_lane(state: ConvState) -> ConvState:
     # Slots the user just filled land on the active thread regardless of lane.
     active = next((t for t in threads if not t.parked), None)
     if active:
-        for key, val in (routed.get("extracted") or {}).items():
-            if str(val).strip():
-                active.slots[key] = val
+        # Map whatever keys the router used onto real schema paths, so the slot
+        # lands on the path GATHER is actually waiting for. Without this the gap
+        # never closes and Mira re-asks what she was just told.
+        mapped, extra = tm.map_extracted(routed.get("extracted") or {}, active)
+        for path, val in mapped.items():
+            active.slots[path] = val
+        for key, val in extra.items():
+            active.slots[key] = val
+        if mapped or extra:
+            trace.append(f"extracted -> {list(mapped) or list(extra)}")
         if lane in (tm.LANE_ADVANCE, tm.LANE_RESUME):
             active.stage_turns += 1
 
@@ -314,14 +341,18 @@ def _node_directive(state: ConvState) -> ConvState:
     lane = state.get("lane")
     trace = list(state.get("trace", []))
 
+    threads = state.get("threads", [])
+    active = next((t for t in threads if not t.parked), None)
+    routed = state.get("router_raw", {}) or {}
+    explicit = str(routed.get("situation", "")).upper() in ("PLAN",) or \
+        bool(routed.get("explicit_advice_request"))
+
     if lane == tm.LANE_QUICK:
-        pol = tm.quick_directive(state.get("situation", ""))
+        pol = tm.quick_directive(state.get("situation", ""), active, explicit)
         stage = "-"
     else:
-        threads = state.get("threads", [])
-        active = next((t for t in threads if not t.parked), None)
         if not active:
-            pol = tm.quick_directive(state.get("situation", ""))
+            pol = tm.quick_directive(state.get("situation", ""), None, explicit)
             stage = "-"
         else:
             pol = tm.stage_directive(active, state.get("gather", {}))

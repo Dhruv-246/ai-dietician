@@ -16,8 +16,11 @@ A THREAD, NOT THE CONVERSATION.
     that do not — a factual aside, a joke — take the QUICK lane and the thread
     does not move. That is what stops this feeling like a questionnaire.
 """
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+
+import memory_facts
 
 # ---------------------------------------------------------------- lanes ----
 LANE_QUICK = "QUICK"        # answer, do not touch the thread
@@ -50,6 +53,18 @@ BUDGET = {S_UNDERSTAND: 25, S_GATHER: 25, S_REFLECT: 22,
 BUDGET_QUICK = 30
 
 MAX_THREADS = 3              # parked-thread cap; oldest spills to open loops
+MAX_NEEDED_PATHS = 3         # a plan longer than this guarantees an interrogation
+
+# Which family of fact to ask about first when several are missing. The router
+# orders by relevance and that ordering is respected within a family, but
+# identity is pushed last on purpose: asking someone's height and weight
+# because they said "I feel fat" is the single most tone-deaf thing this
+# system can do.
+GAP_PRIORITY = {
+    "current_pattern": 0, "progress": 1, "diet": 2, "lifestyle": 3,
+    "preferences": 4, "goals": 5, "health": 6, "entities": 7,
+    "misc": 8, "identity": 9,
+}
 
 # ------------------------------------------------------------ staleness ----
 # Facts age at very different rates. Resolved by first path segment.
@@ -149,6 +164,128 @@ def plan_gather(thread, ledger_view, fact_ages, now=None):
     return {"known": known, "stale": stale, "missing": missing}
 
 
+def _tokens_of(text):
+    drop = {"", "current", "pattern", "the", "a", "of", "her", "his", "their",
+            "user", "what", "when", "how", "does", "do", "is", "are"}
+    return {t for t in re.split(r"[^a-zA-Z0-9]+", str(text).lower()) if t} - drop
+
+
+# Synonyms for the SCHEMA's leaf names — a small closed set, so this is a
+# vocabulary bridge rather than per-problem hardcoding. It lets "dinner_food"
+# reach current_pattern.dinner.frequent without the router having to guess our
+# exact key names.
+_LEAF_SYNONYMS = {
+    "frequent": {"food", "foods", "eat", "eats", "eating", "meal", "meals",
+                 "items", "dish", "dishes", "khana", "menu", "usually"},
+    "time": {"time", "timing", "when", "hour", "clock", "baje", "oclock"},
+    "note": {"note", "notes", "detail", "details", "comment"},
+    "gaps": {"gap", "gaps", "skip", "skipped", "missed", "missing"},
+    "conditions": {"condition", "conditions", "disease", "illness", "diagnosis"},
+    "allergies": {"allergy", "allergies", "allergic"},
+    "medications": {"medication", "medications", "medicine", "medicines", "drug"},
+    "restrictions": {"restriction", "restrictions", "avoid", "avoids", "cannot"},
+    "type": {"type", "kind", "vegetarian", "diet"},
+    "likes": {"like", "likes", "prefers", "favourite", "favorite"},
+    "dislikes": {"dislike", "dislikes", "hates", "hate"},
+    "schedule": {"schedule", "routine", "shift", "work", "office", "job"},
+    "cooking_situation": {"cooking", "cook", "cooks", "kitchen"},
+    "struggles": {"struggle", "struggles", "difficulty", "hard", "problem"},
+    "what_failed": {"failed", "fail", "didnt", "unsuccessful"},
+    "what_worked": {"worked", "works", "successful", "helped"},
+    "primary_goal": {"goal", "goals", "aim", "objective"},
+    "weight_kg": {"weight", "kg", "kilos"},
+    "height_cm": {"height", "cm", "tall"},
+}
+
+# Leaf words too generic to identify a path on their own — "blood_type" must
+# not become diet.type. These always need their qualifier to appear as well.
+_GENERIC_LEAVES = {"type", "time", "note", "target", "gaps", "budget",
+                   "household", "motivation"}
+
+_TIMEY = re.compile(r"(\d{1,2}\s*(?::|\.)?\s*\d{0,2}\s*(am|pm|बजे|baje)|\d{1,2}\s*(am|pm|बजे|baje))",
+                    re.IGNORECASE)
+
+
+def _expand(tokens):
+    """Add leaf names implied by the tokens, so synonyms score like the real name."""
+    out = set(tokens)
+    for leaf, words in _LEAF_SYNONYMS.items():
+        if tokens & words:
+            out.add(leaf)
+    return out
+
+
+def map_extracted(raw, thread):
+    """Map whatever keys the router invented onto REAL schema paths.
+
+    The router is asked to key its extractions by schema path, but it will not
+    always comply — real runs produced keys like "dinner" and "dinner_time".
+    Left unmapped, the slot never lands on the path GATHER is waiting for, the
+    gap never closes, and Mira asks the same question again. So the mapping is
+    done in code, generally, rather than trusting the model to be consistent.
+
+    Returns (mapped, adhoc): mapped is {schema_path: value}, adhoc is
+    everything that had no plausible home and is kept on the thread only.
+    """
+    schema = set(memory_facts.SCHEMA)
+    mapped, adhoc = {}, {}
+    for key, val in (raw or {}).items():
+        k = str(key).strip()
+        if not k or not str(val).strip():
+            continue
+        if k in schema:
+            mapped[k] = val
+            continue
+        kt = _expand(_tokens_of(k))
+        if not kt:
+            adhoc[k] = val
+            continue
+        # A bare slot name ("dinner") is ambiguous across .time / .frequent.
+        # The VALUE disambiguates: "7pm" is a time, "roti sabzi" is not.
+        looks_like_time = bool(_TIMEY.search(str(val)))
+        kt = kt | ({"time"} if looks_like_time else {"frequent"}) \
+            if kt <= set(memory_facts.MEAL_SLOTS) else kt
+        best, score = None, 0.0
+        # Prefer paths this thread actually asked for, then the whole schema.
+        for pool in (list(thread.needed_paths), sorted(schema)):
+            for path in pool:
+                pt = _expand(_tokens_of(path))
+                if not pt:
+                    continue
+                sc = len(kt & pt) / len(kt | pt)
+                segs = [s for s in path.lower().split(".") if s not in
+                        ("current", "pattern")]
+                leaf, qualifiers = segs[-1], set(segs[:-1])
+                # A key that IS one of the path's segments is a strong signal:
+                # "dinner" -> current_pattern.dinner.time
+                if kt and kt <= set(segs):
+                    sc = max(sc, 0.75)
+                # Naming the leaf is strong too ("work_routine" -> schedule).
+                # Two-segment paths have unique leaves, so the leaf alone is
+                # enough. Deeper paths repeat their leaves across sub-entities
+                # (six meal slots all have .time), so there the qualifier must
+                # appear too — otherwise "sleep_time" lands on dinner.time.
+                needs_qualifier = len(segs) >= 3 or leaf in _GENERIC_LEAVES
+                if leaf in kt and (not needs_qualifier or (kt & qualifiers)):
+                    sc = max(sc, 0.7)
+                if sc > score:
+                    best, score = path, sc
+            if score >= 0.5:
+                break
+        if best and score >= 0.5:
+            mapped[best] = val
+        else:
+            adhoc[k] = val
+    return mapped, adhoc
+
+
+def rank_gaps(gaps, needed_order):
+    """Most useful missing thing first. Family priority beats router order."""
+    order = {p: i for i, p in enumerate(needed_order or [])}
+    return sorted(gaps, key=lambda g: (GAP_PRIORITY.get(g.split(".")[0], 7),
+                                       order.get(g, 99)))
+
+
 def _read_path(view, path):
     node = view or {}
     for part in (path or "").split("."):
@@ -166,6 +303,16 @@ def prefill(thread, gather):
 
 
 # -------------------------------------------------------------- advance ----
+def has_reflectable(gather):
+    """Is there anything worth saying back to the user?
+
+    A reflection with nothing in it — "I don't yet know your diet or routine" —
+    is worse than no reflection: it spends a turn telling the user we weren't
+    listening. Observed live, so REFLECT is now gated on substance.
+    """
+    return len(gather.get("known") or {}) >= 1
+
+
 def next_stage(thread, gather, sufficient):
     """Where the thread goes AFTER this turn. Pure function of state.
 
@@ -182,12 +329,15 @@ def next_stage(thread, gather, sufficient):
         # force a gather turn — a slightly out-of-date fact is worth confirming
         # inside another sentence, never worth spending a whole turn asking for.
         if sufficient or not gather["missing"]:
-            return S_REFLECT
+            return S_REFLECT if has_reflectable(gather) else S_ADVISE
         return S_GATHER
 
     if st == S_GATHER:
         if sufficient or not gather["missing"] or dwelled:
-            return S_REFLECT
+            # Force-advanced with nothing learned (two sideways answers, say):
+            # skip the reflection and work with what we have rather than
+            # narrating our own ignorance back at them.
+            return S_REFLECT if has_reflectable(gather) else S_ADVISE
         return S_GATHER
 
     if st == S_REFLECT:
@@ -214,24 +364,38 @@ def stage_directive(thread, gather):
         d = ("The user has just raised a problem. Ask ONE short question to understand "
              "it better. Do NOT give any advice, tip or solution yet.")
     elif st == S_GATHER:
-        gaps = gather["missing"] + gather["stale"]
-        pretty = ", ".join(_humanise(g) for g in gaps[:4]) or "what you still need"
+        # ONE question about ONE thing. The previous version said "cover as much
+        # as sounds natural", and the model read that as permission to ask four
+        # questions in a row. Naming a single target is the fix.
+        ranked = rank_gaps(gather["missing"], thread.needed_paths)
+        target = _humanise(ranked[0]) if ranked else "what is still unclear"
         known = ", ".join(f"{_humanise(k)}={v}" for k, v in
-                          list(gather["known"].items())[:4])
-        d = (f"You still need: {pretty}. Ask ONE natural question — cover as much of "
-             f"that as sounds natural in a single question, do not ask them one by one.")
-        if gather["stale"]:
-            d += (" Some of it you already believe you know but it may be out of date — "
-                  "confirm those as a quick yes/no rather than asking openly.")
+                          list(gather["known"].items())[:5])
+        d = (f"Ask exactly ONE short, natural question, about ONE thing: {target}. "
+             "You may let a closely related detail ride along inside the same "
+             "sentence if it sounds natural, but your reply must contain exactly "
+             "one question mark and must never read as a list.")
         if known:
-            d += f" Already known, do NOT ask again: {known}."
+            d += (f" You ALREADY know this — never ask for any of it again: {known}.")
+        if gather["stale"]:
+            d += (f" You also believe {_humanise(gather['stale'][0])} is still true "
+                  "but it is a little old; confirm it inside your question rather "
+                  "than asking about it separately.")
+        d += (" Do not ask for age, height, weight or medical history unless that "
+              "is genuinely what you just asked about.")
     elif st == S_REFLECT:
         known = ", ".join(f"{_humanise(k)}={v}" for k, v in
                           list(gather["known"].items())[:5])
-        d = ("Say the problem back in your own words so they feel heard. "
-             "Do NOT ask a question and do NOT advise in this turn.")
+        d = ("Say the problem back in your own words, using the specifics below, "
+             "so they feel heard. Do NOT ask a question in this turn.")
         if known:
-            d += f" Use what you know: {known}."
+            d += f" What you know: {known}."
+        # When the picture is already clear, forcing reflection and advice into
+        # separate turns is the ceremony that makes a graph feel like a graph.
+        if len(gather["known"]) >= 2 and not gather["missing"]:
+            d += (" The picture is already clear, so you MAY name the likely reason "
+                  "and give one concrete suggestion in this same short reply if that "
+                  "flows naturally — do not stretch it over two turns artificially.")
         if gather["stale"]:
             first = _humanise(gather["stale"][0])
             d += (f" You believe {first} is still true but it is a little old — "
@@ -250,8 +414,26 @@ def stage_directive(thread, gather):
             "may_advise": st in (S_ADVISE, S_CLOSE)}
 
 
-def quick_directive(situation=""):
-    """QUICK lane: answer and get out. The thread does not move."""
+# Stages at which the thread has earned the right to prescribe.
+ADVISE_STAGES = (S_ADVISE, S_CONFIRM, S_CLOSE)
+
+
+def quick_directive(situation="", active=None, explicit_advice_request=False):
+    """QUICK lane: answer and get out. The thread does not move.
+
+    THE BYPASS THIS CLOSES. `may_advise` used to be True for every QUICK turn,
+    so a single router misclassification handed out advice regardless of thread
+    state. Observed live: the user said "हम्म" and received a full diet
+    prescription while the fatigue thread was still gathering.
+
+    Permission now comes from the THREAD, not the lane. With no thread open a
+    direct question still gets a direct answer — that is P-3's job. With a
+    thread open and still short of ADVISE, the question is answered but
+    prescribing is withheld, including when the user asks for it outright:
+    the stage rules decide when advice is earned, not how loudly it is
+    requested.
+    """
+    gated = bool(active) and not active.parked and active.stage not in ADVISE_STAGES
     d = ("Answer the user's question directly and briefly. "
          "Do not start a consultation and do not interrogate them.")
     if situation == "OFF_TOPIC":
@@ -262,8 +444,20 @@ def quick_directive(situation=""):
              "Do NOT defend or explain what you said before. Then carry on.")
     elif situation == "MEMORY_QUERY":
         d = "Answer from what you remember about this user. Be specific."
+
+    if gated:
+        d += (f" IMPORTANT: you are in the middle of understanding their '{active.topic}' "
+              "problem and do not yet know enough to advise on it. Answer only what "
+              "they just asked. Do NOT add tips, plans or recommendations about "
+              f"'{active.topic}', and do not list foods to eat or avoid.")
+        if explicit_advice_request:
+            d += (" They are asking for advice, so acknowledge that warmly and say "
+                  "you want one more detail first — then ask for it in the same "
+                  "breath. Exactly one question.")
+        else:
+            d += " Then steer back to what you were discussing, without a question."
     d += f" Keep it under {BUDGET_QUICK} words."
-    return {"directive": d, "budget": BUDGET_QUICK, "may_advise": True}
+    return {"directive": d, "budget": BUDGET_QUICK, "may_advise": not gated}
 
 
 def _humanise(path):
