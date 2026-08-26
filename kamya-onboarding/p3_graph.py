@@ -45,50 +45,123 @@ _ROUTER_TIMEOUT = float(os.getenv("P3_ROUTER_TIMEOUT", "5.0"))
 
 _PATHS = "\n".join(f"  {p}" for p in sorted(memory_facts.SCHEMA))
 
-_ROUTER_SYSTEM = f"""\
-You are the router for Mira, an AI dietician on a live voice call. You do NOT
-talk to the user. You classify one user turn and return JSON.
+# What each stage means, sent to the router so it can read a short reply in
+# context. "हाँ" after a reflection is a confirmation that should advance the
+# thread; the same word after a factual answer is a backchannel.
+_STAGE_MEANING = {
+    tm.S_UNDERSTAND: "Mira just asked what the problem is. A reply describing "
+                     "the problem ADVANCES.",
+    tm.S_GATHER: "Mira just asked for one specific detail. Any answer to it, "
+                 "even partial or vague, ADVANCES.",
+    tm.S_REFLECT: "Mira just stated the problem back and is waiting for the "
+                  "user to confirm it. A confirmation ADVANCES toward advice.",
+    tm.S_ADVISE: "Mira just gave advice. A reaction to that advice ADVANCES.",
+    tm.S_CONFIRM: "Mira just asked whether the advice is doable. Any yes/no "
+                  "ADVANCES.",
+    tm.S_CLOSE: "This thread is finished.",
+}
 
-Return exactly:
+_ROUTER_SYSTEM = f"""\
+You are the router for Mira, an AI dietician on a live Hinglish voice call.
+You never speak to the user. You read ONE user turn IN CONTEXT and return JSON.
+
+Return exactly this shape, nothing else:
 {{
   "lane": "QUICK" | "ADVANCE" | "SWITCH" | "RESUME",
-  "situation": "FACTUAL"|"PERSONAL"|"PROBLEM"|"PLAN"|"UPDATE"|"CORRECTION"|"MEMORY_QUERY"|"AMBIGUOUS"|"OFF_TOPIC"|"SOCIAL",
-  "topic": "<short topic name, only when opening a new thread>",
+  "situation": "FACTUAL"|"PERSONAL"|"PROBLEM"|"PLAN"|"UPDATE"|"CORRECTION"|"MEMORY_QUERY"|"AMBIGUOUS"|"OFF_TOPIC"|"SOCIAL"|"AFFIRMATION",
+  "topic": "<short topic name — only when opening a new thread>",
   "template": "PROBLEM" | "PLAN" | "HABIT",
   "needed_paths": ["<memory path>", ...],
-  "adhoc": ["<something not covered by the paths>", ...],
-  "extracted": {{"<path or adhoc>": "<value the user just gave>"}},
+  "adhoc": ["<something the schema cannot express>"],
+  "extracted": {{"<memory path>": "<value the user just gave>"}},
   "sufficient": true | false,
-  "resume_hint": "<topic they are returning to, only for RESUME>"
+  "explicit_advice_request": true | false,
+  "resume_hint": "<topic they are returning to — only for RESUME>"
 }}
 
-LANE — the most important field. Bias toward QUICK when unsure.
-  QUICK    A question or remark that does NOT need a consultation: a factual
-           question, an aside, a correction, a greeting, something off-topic,
-           a memory lookup, or a short answer that needs no follow-up.
-           Also use QUICK for any turn while no thread is open that is not
-           itself a new problem.
-  ADVANCE  The user is responding to the thread that is currently open —
-           answering the question Mira just asked, or continuing that topic.
-  SWITCH   The user raises a NEW problem, or explicitly drops the current one.
-  RESUME   The user returns to a topic that was parked earlier.
+=====================  LANE  =====================
+Decide by intent IN CONTEXT, never by sentence length. Work through these in
+order and stop at the first that matches.
 
-needed_paths — ONLY when opening a thread (SWITCH). AT MOST 3, ordered most
-useful first. Choose ONLY from this list; never invent a path. Pick what you
-would genuinely need to advise on THIS problem — not everything plausible.
-Do NOT ask for age, gender, height or weight unless the problem is literally
-about body measurements. Prefer what and when they eat.
+1. RESUME — they are going back to a parked topic.
+   "वो भूख वाली बात पे वापस आते हैं" / "पहले वाली बात" / "जो हम discuss कर रहे थे"
+   Only if parked_threads is non-empty. Set resume_hint.
+
+2. SWITCH — a genuinely NEW problem, or they explicitly drop the current one.
+   "अरे वो छोड़िए, शादी है weight कम करना है"
+   Opening a thread when none is active is also SWITCH.
+
+3. ADVANCE — the turn belongs to the active thread. This is the DEFAULT
+   whenever a thread is active and the turn relates to it in any way.
+   Includes ALL of these:
+     - answering what Mira just asked, even partially: "सात बजे", "पता नहीं"
+     - CONFIRMING what Mira just said: "हाँ", "हाँ बिल्कुल", "सही", "बिल्कुल सही",
+       "हाँ यही", "आपने सही समझा", "correct", "exactly", "that's right", "yes"
+     - disagreeing: "नहीं, ऐसा नहीं है"
+     - reacting to advice: "ठीक है", "try करूँगी", "मुश्किल है"
+     - adding detail unprompted: "और मैं देर से सोती भी हूँ"
+     - a vague or sideways reply that is still a reply: "बस ऐसे ही", "हम्म"
+
+4. QUICK — ONLY when the turn genuinely does not move the active thread:
+     - a self-contained factual question on a DIFFERENT subject
+       ("green tea रात को चलेगी?" while discussing night hunger)
+     - greetings and small talk with NO thread open
+     - off-topic ("आप शादीशुदा हैं?")
+     - correcting a stored fact ("नहीं, मैं egg खाती हूँ")
+     - asking what you remember ("पिछली बार क्या बोला था?")
+
+CRITICAL — SHORT REPLIES ARE NOT AUTOMATICALLY QUICK.
+If a thread is active and the reply plausibly responds to Mira's last message,
+it is ADVANCE. Use stage_means to decide. Examples with a thread at REFLECT,
+where Mira has just stated the problem back:
+   "हाँ बिल्कुल सही कहा"  -> ADVANCE, situation AFFIRMATION   (NOT QUICK)
+   "हाँ"                  -> ADVANCE, situation AFFIRMATION   (NOT QUICK)
+   "सही"                  -> ADVANCE, situation AFFIRMATION   (NOT QUICK)
+   "हम्म"                 -> ADVANCE, situation AMBIGUOUS     (NOT QUICK)
+   "green tea चलेगी?"      -> QUICK  (different subject, does not answer Mira)
+When genuinely unsure between ADVANCE and QUICK with a thread open, choose
+ADVANCE. Losing the thread is worse than advancing it a turn early.
+
+=====================  needed_paths  =====================
+ONLY when opening a thread (SWITCH). AT MOST 3, most useful first.
+Choose ONLY from the list below. NEVER invent a path.
+
+Choose by asking: "which facts, if I knew their VALUES, would let me explain
+WHY this is happening and what to change?" — NOT "which path names share words
+with what the user said."
+
+A symptom is almost always caused by something EARLIER, not by itself. Look
+UPSTREAM of the complaint:
+   night hunger      -> what and when DINNER was (the cause), not what they
+                        snack on at night (that is the symptom restated)
+   afternoon slump   -> breakfast and lunch, not the slump
+   bloating at night -> what the evening meal contains
+   no energy in gym  -> the meal before the workout
+
+Prefer what and when they EAT. Do NOT choose identity.basics.* or
+identity.body.* unless the problem is literally about age or body
+measurements. Do not request a fact you could not act on.
+
+ALLOWED PATHS
 {_PATHS}
 
-adhoc — only for something genuinely not covered above (e.g. "stress at work").
-At most ONE. Never restate the topic itself as adhoc.
+adhoc — at most ONE, only for something the schema genuinely cannot express
+(e.g. "sleep timing", "stress at work"). Never restate the topic as adhoc.
 
-extracted — anything the user JUST told you in this turn. Key it by the exact
-schema path from the list above wherever one fits — not by a made-up name.
-"सात बजे dinner करती हूँ" -> {{"current_pattern.dinner.time": "7pm"}}.
+=====================  extracted  =====================
+Anything the user told you IN THIS TURN, keyed by the EXACT schema path.
+   "सात बजे dinner करती हूँ"  -> {{"current_pattern.dinner.time": "7pm"}}
+   "दो roti और sabzi"        -> {{"current_pattern.dinner.frequent": "roti, sabzi"}}
+   "मुझे PCOS है"             -> {{"health.conditions": "PCOS"}}
+Never ask again for anything you put here, and never list it in needed_paths.
+Empty object if they gave no new fact.
 
-sufficient — true if there is now enough to give useful advice, even if some
-details are still unknown. A good dietician acts on partial information.
+=====================  other fields  =====================
+sufficient — true when there is enough to give useful advice even if details
+are missing. A good dietician acts on partial information.
+
+explicit_advice_request — true when they directly ask what to eat or do
+("बस बता दीजिए क्या खाऊँ", "diet plan दे दीजिए").
 
 Output JSON only."""
 
@@ -176,12 +249,27 @@ async def _call_router(text, threads, history):
     from groq import AsyncGroq
     active = next((t for t in threads if not t.parked), None)
     parked = [t.topic for t in threads if t.parked]
+
+    # Mira's last line is what a short reply is REPLYING TO. Without it the
+    # router cannot tell a confirmation ("हाँ" after a reflection) from a
+    # backchannel ("हाँ" after a factual answer), and it was defaulting both
+    # to QUICK — which silently abandoned the thread.
+    mira_last = next((m.get("content") for m in reversed(history or [])
+                      if m.get("role") == "assistant"), "")
+
     ctx = {
         "active_thread": None if not active else {
-            "topic": active.topic, "stage": active.stage,
+            "topic": active.topic,
+            "stage": active.stage,
+            "stage_means": _STAGE_MEANING.get(active.stage, ""),
+            "turns_in_stage": active.stage_turns,
+            "already_known": {k: str(v)[:60] for k, v in
+                              list(active.slots.items())[:6]},
             "still_missing": active.gaps()[:5],
         },
         "parked_threads": parked,
+        "mira_last_said": str(mira_last)[:300],
+        "user_said": text,
         "recent_turns": history[-4:],
     }
     client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
@@ -189,9 +277,7 @@ async def _call_router(text, threads, history):
         model=_ROUTER_MODEL,
         messages=[
             {"role": "system", "content": _ROUTER_SYSTEM},
-            {"role": "user", "content":
-                "CONTEXT:\n" + json.dumps(ctx, ensure_ascii=False)
-                + "\n\nUSER TURN:\n" + text},
+            {"role": "user", "content": json.dumps(ctx, ensure_ascii=False)},
         ],
         temperature=0.1,
         response_format={"type": "json_object"},
