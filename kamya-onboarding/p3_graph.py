@@ -183,8 +183,15 @@ Never ask again for anything you put here, and never list it in needed_paths.
 Empty object if they gave no new fact.
 
 =====================  other fields  =====================
-sufficient — true when there is enough to give useful advice even if details
-are missing. A good dietician acts on partial information.
+sufficient — do you UNDERSTAND THE COMPLAINT well enough to advise on it?
+This is about the problem, NOT about how many facts are on file.
+  "रात को भूख लगती है"           -> true  (a specific, actionable complaint)
+  "खाने के बाद पेट फूलता है"      -> true
+  "मुझे और भी दिक्कतें हो रही हैं"  -> FALSE (which problems? nothing to act on)
+  "तबीयत ठीक नहीं लग रही"         -> FALSE (too vague)
+  "कुछ अजीब लग रहा है"            -> FALSE
+If you could not tell another dietician what is actually wrong in one
+sentence, it is false.
 
 explicit_advice_request — true when they directly ask what to eat or do
 ("बस बता दीजिए क्या खाऊँ", "diet plan दे दीजिए").
@@ -449,9 +456,20 @@ def _node_plan(state: ConvState) -> ConvState:
     if state.get("lane") == tm.LANE_SWITCH:
         active.stage = tm.S_UNDERSTAND
         active.stage_turns = 1
-        if not gather["missing"]:
-            active.stage = tm.S_REFLECT      # ledger already answered everything
+        # Skipping ahead needs BOTH: the facts to advise with (missing empty)
+        # AND an actual understanding of the complaint (router's `sufficient`).
+        # Live failure: the user said only "मुझे और भी दिक्कतें होने लग रही हैं"
+        # — nothing about WHAT — but their ledger already held the three paths
+        # the router happened to pick, so missing was 0 and the graph jumped
+        # straight to REFLECT and advised. Having the facts is not the same as
+        # knowing the problem. When the complaint is vague, UNDERSTAND must
+        # keep its turn and Mira must ask.
+        sufficient = bool((state.get("router_raw") or {}).get("sufficient"))
+        if not gather["missing"] and sufficient:
+            active.stage = tm.S_REFLECT
             trace.append("GATHER skipped — memory had everything")
+        elif not gather["missing"]:
+            trace.append("holding at UNDERSTAND — problem statement is vague")
     else:
         sufficient = bool((state.get("router_raw") or {}).get("sufficient"))
         nxt = tm.next_stage(active, gather, sufficient)

@@ -409,9 +409,14 @@ def stage_directive(thread, gather):
             d += (f" You believe {first} is still true but it is a little old — "
                   f"you may fold a light confirmation into the same sentence.")
     elif st == S_ADVISE:
-        d = ("Now name the likely reason and give ONE concrete change. "
-             "You MUST refer to something specific about this user — a food, a timing, "
-             "a condition — not generic advice.")
+        # Live log: "policy VIOLATION stage=ADVISE: more than one question".
+        # The stage said nothing about question count, so the model stacked
+        # three symptom checks into one breath.
+        d = ("Name the likely reason and give ONE concrete change. "
+             "You MUST refer to something specific about this user — a food, a "
+             "timing, a condition — not generic advice. ONE suggestion only, "
+             "never a list of options. End with AT MOST one short question, or "
+             "no question at all.")
     elif st == S_CONFIRM:
         d = "Briefly check whether that feels doable for them. One short question."
     else:

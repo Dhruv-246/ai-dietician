@@ -827,10 +827,17 @@ class ResponseValidator(FrameProcessor):
     let her?" were previously unanswerable.
     """
 
+    # Spoken when generation produces nothing at all. Deliberately vague about
+    # the cause — the user does not need to hear about token limits — and
+    # deliberately hands the turn back rather than dead-ending.
+    FALLBACK = "माफ़ कीजिए, एक second — फिर से बताइएगा?"
+    FALLBACK_REPEAT = "लगता है connection में कुछ दिक्कत है. थोड़ी देर में बात करते हैं?"
+
     def __init__(self, thread_proc):
         super().__init__()
         self._thread = thread_proc
         self._buf = []
+        self._empties = 0
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -840,8 +847,22 @@ class ResponseValidator(FrameProcessor):
             elif isinstance(frame, LLMTextFrame):
                 self._buf.append(getattr(frame, "text", "") or "")
             elif isinstance(frame, LLMFullResponseEndFrame):
-                self._check("".join(self._buf))
+                text = "".join(self._buf)
                 self._buf = []
+                problems = self._check(text)
+                # DEAD AIR IS THE WORST VOICE FAILURE. When the model returns
+                # nothing — Groq 429, a timeout, a safety refusal — the user
+                # hears silence and assumes the call dropped. Observed live on
+                # a daily-token-limit 429: Mira simply stopped answering and
+                # the user had to say "मेरा बोलिए". Speak instead.
+                if "empty" in problems:
+                    self._empties += 1
+                    line = (self.FALLBACK if self._empties == 1
+                            else self.FALLBACK_REPEAT)
+                    _log(f"  empty response #{self._empties} -> speaking fallback")
+                    await self.push_frame(TTSSpeakFrame(line), direction)
+                else:
+                    self._empties = 0
         await self.push_frame(frame, direction)
 
     def _check(self, text):
@@ -850,7 +871,7 @@ class ResponseValidator(FrameProcessor):
             problems = thread_machine.validate(text, policy)
         except Exception as exc:
             _log(f"validate failed: {exc}")
-            return
+            return []
         words = len((text or "").split())
         if problems:
             _log(f"  policy VIOLATION stage={policy.get('stage')} "
@@ -858,6 +879,7 @@ class ResponseValidator(FrameProcessor):
         else:
             _log(f"  policy ok stage={policy.get('stage')} words={words} "
                  f"budget={policy.get('budget')}")
+        return problems
 
 
 class RAGProcessor(FrameProcessor):
