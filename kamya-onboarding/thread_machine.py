@@ -351,6 +351,9 @@ def next_stage(thread, gather, sufficient):
     return S_CLOSE
 
 
+MAX_STAGE_TURNS = 9      # bound on stage_turns; nothing should ever reach this
+
+
 # ------------------------------------------------------------ directives ---
 def stage_directive(thread, gather):
     """The behavioural instruction appended to the base system prompt.
@@ -412,11 +415,21 @@ def stage_directive(thread, gather):
         # Live log: "policy VIOLATION stage=ADVISE: more than one question".
         # The stage said nothing about question count, so the model stacked
         # three symptom checks into one breath.
-        d = ("Name the likely reason and give ONE concrete change. "
-             "You MUST refer to something specific about this user — a food, a "
-             "timing, a condition — not generic advice. ONE suggestion only, "
-             "never a list of options. End with AT MOST one short question, or "
-             "no question at all.")
+        # The citation demand is CONDITIONAL. Ordering it to "refer to something
+        # specific about this user" when we know nothing about them is an
+        # instruction to invent one — the worst possible failure in a health
+        # product. When the slots are empty, ask for general and safe instead.
+        if gather["known"]:
+            d = ("Name the likely reason and give ONE concrete change. "
+                 "You MUST refer to something specific about this user — a food, "
+                 "a timing, a condition — not generic advice.")
+        else:
+            d = ("You do NOT have specifics about this user for this problem, so "
+                 "give ONE safe, general suggestion and be honest that you would "
+                 "need to know more to tailor it. Do NOT invent details about "
+                 "their diet, timings or health.")
+        d += (" ONE suggestion only, never a list of options. End with AT MOST "
+              "one short question, or no question at all.")
     elif st == S_CONFIRM:
         d = "Briefly check whether that feels doable for them. One short question."
     else:
@@ -502,6 +515,37 @@ def validate(text, policy, thread=None):
 
 
 # ------------------------------------------------------- thread stack ------
+def _topic_tokens(text):
+    """Tokens for topic comparison. Unlike _tokens_of this KEEPS Devanagari,
+    because thread topics are frequently Hindi."""
+    drop = {"", "ki", "ka", "ke", "problem", "issue", "the", "a", "my",
+            "की", "का", "के", "में", "है", "हैं"}
+    return {t for t in re.split(r"[^\w\u0900-\u097f]+", (text or "").lower())
+            if t} - drop
+
+
+def find_thread(threads, topic):
+    """An existing thread for this topic — active OR parked.
+
+    Without this, a user who simply restates their problem ("रात को भूख" then
+    "रात को भूख लगती है") gets a SECOND thread on the same subject: the first
+    is parked, its collected slots are stranded, and the consultation restarts
+    from UNDERSTAND. Observed in adversarial testing.
+    """
+    want = _topic_tokens(topic)
+    if not want:
+        return None
+    for th in threads:
+        have = _topic_tokens(th.topic)
+        if not have:
+            continue
+        if want == have or want <= have or have <= want:
+            return th
+        if len(want & have) / len(want | have) >= 0.6:
+            return th
+    return None
+
+
 def find_parked(threads, topic_hint):
     """Best-effort match of a resume request to a parked thread."""
     hint = (topic_hint or "").lower().strip()

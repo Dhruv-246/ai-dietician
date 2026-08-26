@@ -379,12 +379,32 @@ def _node_lane(state: ConvState) -> ConvState:
     trace = list(state.get("trace", []))
 
     if lane == tm.LANE_SWITCH:
-        tm.park_active(threads)
+        # Restating a problem is not a new problem. Reuse the existing thread —
+        # unparking it if needed — so collected slots and stage survive.
+        existing = tm.find_thread(threads, routed.get("topic") or "")
+        if existing is not None:
+            tm.park_active(threads)
+            existing.parked = False
+            threads.remove(existing)
+            threads.insert(0, existing)
+            trace.append(f"SWITCH -> existing thread '{existing.topic}' @{existing.stage}")
+            lane = tm.LANE_ADVANCE          # continue it, do not restart it
+        else:
+            tm.park_active(threads)
         # Invented paths are dropped, and the plan is capped: a longer plan
         # cannot be satisfied inside the dwell limit, so it only guarantees an
         # interrogation that then gets force-advanced anyway.
-        needed = [p for p in (routed.get("needed_paths") or [])
-                  if p in memory_facts.SCHEMA][:tm.MAX_NEEDED_PATHS]
+    if lane == tm.LANE_SWITCH:
+        # F2: dedupe while preserving the router's relevance ordering —
+        # duplicates inflate the gap count and make GATHER think there is
+        # more outstanding than there is.
+        seen = set()
+        needed = []
+        for p in (routed.get("needed_paths") or []):
+            if p in memory_facts.SCHEMA and p not in seen:
+                seen.add(p)
+                needed.append(p)
+        needed = needed[:tm.MAX_NEEDED_PATHS]
         topic = str(routed.get("topic") or "this")[:60]
         adhoc = []
         for a in (routed.get("adhoc") or [])[:2]:
@@ -433,9 +453,17 @@ def _node_lane(state: ConvState) -> ConvState:
         if mapped or extra:
             trace.append(f"extracted -> {list(mapped) or list(extra)}")
         if lane in (tm.LANE_ADVANCE, tm.LANE_RESUME):
-            active.stage_turns += 1
+            if active.stage == tm.S_CLOSE:
+                # A finished thread has nothing left to advance. Without this
+                # it sits at CLOSE incrementing forever and Mira keeps being
+                # told to "wrap up warmly" on every subsequent turn.
+                trace.append("thread already CLOSE -> nothing to advance")
+                lane = tm.LANE_QUICK
+            else:
+                active.stage_turns = min(active.stage_turns + 1,
+                                         tm.MAX_STAGE_TURNS)
 
-    return {"threads": threads, "trace": trace}
+    return {"threads": threads, "lane": lane, "trace": trace}
 
 
 def _node_plan(state: ConvState) -> ConvState:

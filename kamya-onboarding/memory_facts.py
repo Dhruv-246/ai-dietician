@@ -98,8 +98,22 @@ def _norm_tokens(text):
     return [t for t in re.split(r"\W+", (text or "").lower()) if len(t) > 1]
 
 
+def _user_lines(transcript):
+    """Only what the USER said. Mira's own words are not evidence about them.
+
+    The check used to run against the whole transcript, so a model could
+    "ground" an invented fact in Mira's acknowledgement — citing "achha" as
+    proof the user has a condition. For a health product that is the wrong
+    failure to leave open. Falls back to the whole text when no speaker labels
+    are present, so a truncated or reformatted transcript still validates.
+    """
+    lines = [l for l in (transcript or "").splitlines()
+             if l.strip().lower().startswith("user:")]
+    return "\n".join(lines) if lines else (transcript or "")
+
+
 def _evidence_grounded(evidence, transcript):
-    """True if enough of the evidence's tokens appear in the transcript.
+    """True if enough of the evidence's tokens appear in what the USER said.
 
     Guards against the model citing a quote the user never said. Returns True
     when there is no transcript to check against (replay of a truncated row).
@@ -109,7 +123,7 @@ def _evidence_grounded(evidence, transcript):
     ev = _norm_tokens(evidence)
     if not ev:
         return False
-    hay = set(_norm_tokens(transcript))
+    hay = set(_norm_tokens(_user_lines(transcript)))
     hits = sum(1 for t in ev if t in hay)
     return (hits / len(ev)) >= _MIN_EVIDENCE_OVERLAP
 
