@@ -43,7 +43,25 @@ _ROUTER_MODEL = os.getenv("P3_ROUTER_MODEL", "openai/gpt-oss-20b")
 # fallback from firing on turns that would have classified correctly.
 _ROUTER_TIMEOUT = float(os.getenv("P3_ROUTER_TIMEOUT", "5.0"))
 
-_PATHS = "\n".join(f"  {p}" for p in sorted(memory_facts.SCHEMA))
+def _paths_block():
+    """Group the 49 schema paths by family.
+
+    The flat listing was the largest single block in the router prompt, and
+    prompt size is router latency, which is turn latency. Grouping keeps every
+    path visible while roughly halving the characters.
+    """
+    fams = {}
+    for path in sorted(memory_facts.SCHEMA):
+        fam, _, leaf = path.rpartition(".")
+        fams.setdefault(fam or path, []).append(leaf if fam else "")
+    out = []
+    for fam, leaves in fams.items():
+        leaves = [l for l in leaves if l]
+        out.append(f"  {fam}.{{{', '.join(leaves)}}}" if leaves else f"  {fam}")
+    return "\n".join(out)
+
+
+_PATHS = _paths_block()
 
 # What each stage means, sent to the router so it can read a short reply in
 # context. "हाँ" after a reflection is a confirmation that should advance the
@@ -273,6 +291,11 @@ async def _call_router(text, threads, history):
         "recent_turns": history[-4:],
     }
     client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+    # gpt-oss-20b is ALSO a reasoning model. Left at default effort it spends
+    # most of its latency thinking about a classification that needs no
+    # thought, and at a 5s ceiling well over half of turns timed out — each
+    # one silently losing a SWITCH or RESUME. reasoning_effort=low is the same
+    # fix that unblocked the compose model.
     resp = await client.chat.completions.create(
         model=_ROUTER_MODEL,
         messages=[
@@ -281,6 +304,7 @@ async def _call_router(text, threads, history):
         ],
         temperature=0.1,
         response_format={"type": "json_object"},
+        reasoning_effort=os.getenv("P3_ROUTER_EFFORT", "low"),
     )
     return json.loads(resp.choices[0].message.content or "{}")
 
