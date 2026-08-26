@@ -21,6 +21,7 @@ Requires: GROQ_API_KEY, SARVAM_API_KEY (STT), ELEVENLABS_API_KEY (TTS) and
 """
 import argparse
 import asyncio
+import copy
 import json
 import os
 import re
@@ -685,6 +686,8 @@ class ThreadMachineProcessor(FrameProcessor):
         self._turn = 0
         self._pending = None
         self._graph = None
+        # Last turn's policy, read by ResponseValidator after generation.
+        self.last_policy = {}
 
     # -- context plumbing --------------------------------------------------
     def _strip_policy(self, msgs):
@@ -728,10 +731,15 @@ class ThreadMachineProcessor(FrameProcessor):
         msgs = self._strip_policy(self._context.get_messages())
         self._turn += 1
 
+        # DEEP copy, not list(). The graph mutates Thread objects in place —
+        # stage, slots, stage_turns — so a shallow copy would let an
+        # interrupted turn change committed state even though _pending was
+        # never applied. Found by test: a barge-in advanced the thread to
+        # REFLECT and filled two slots from a reply the user never heard.
         out = await self._graph.ainvoke({
             "turn_text": text,
             "turn_index": self._turn,
-            "threads": list(self._threads),
+            "threads": copy.deepcopy(self._threads),
             "ledger_view": self._ledger_view,
             "fact_ages": self._fact_ages,
             "history": self._history(msgs),
@@ -756,6 +764,10 @@ class ThreadMachineProcessor(FrameProcessor):
         msgs.append({"role": "system", "content": block})
         self._context.set_messages(msgs)
 
+        self.last_policy = {
+            "stage": out.get("stage"), "lane": out.get("lane"),
+            "budget": out.get("budget"), "may_advise": out.get("may_advise"),
+        }
         # Staged, not applied. See INTERRUPTION above.
         self._pending = {
             "threads": out.get("threads", self._threads),
@@ -779,6 +791,53 @@ class ThreadMachineProcessor(FrameProcessor):
         """Unfinished threads become open loops for the next call."""
         return [thread_machine.open_loop_text(t) for t in self._threads
                 if t.stage != thread_machine.S_CLOSE]
+
+
+class ResponseValidator(FrameProcessor):
+    """Check what Mira actually said against the policy for that turn.
+
+    Sits between the LLM and TTS, accumulating streamed tokens and checking at
+    LLMFullResponseEndFrame. It is a PASS-THROUGH: frames are never held, so
+    it costs no latency and cannot introduce dead air.
+
+    It LOGS, it does not block. On a phone call a silence is worse than a
+    slightly long sentence, and regenerating would double the turn. The point
+    is that stage-rule violations become visible and countable instead of
+    being invisible — "did she ask two questions?", "did she advise before we
+    let her?" were previously unanswerable.
+    """
+
+    def __init__(self, thread_proc):
+        super().__init__()
+        self._thread = thread_proc
+        self._buf = []
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, LLMFullResponseStartFrame):
+                self._buf = []
+            elif isinstance(frame, LLMTextFrame):
+                self._buf.append(getattr(frame, "text", "") or "")
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                self._check("".join(self._buf))
+                self._buf = []
+        await self.push_frame(frame, direction)
+
+    def _check(self, text):
+        policy = dict(getattr(self._thread, "last_policy", {}) or {})
+        try:
+            problems = thread_machine.validate(text, policy)
+        except Exception as exc:
+            _log(f"validate failed: {exc}")
+            return
+        words = len((text or "").split())
+        if problems:
+            _log(f"  policy VIOLATION stage={policy.get('stage')} "
+                 f"lane={policy.get('lane')}: {'; '.join(problems)}")
+        else:
+            _log(f"  policy ok stage={policy.get('stage')} words={words} "
+                 f"budget={policy.get('budget')}")
 
 
 class RAGProcessor(FrameProcessor):
@@ -1153,6 +1212,12 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     stages += [
         aggregator.user(),            # add user turn to context
         llm,                          # reasoning (sees any injected references)
+    ]
+    if thread_proc is not None:
+        # Observes what Mira actually said vs the stage policy. Pass-through,
+        # so it adds no latency and never withholds audio.
+        stages.append(ResponseValidator(thread_proc))
+    stages += [
         tts,                          # text -> speech
         transport.output(),           # speaker out (to LiveKit)
         aggregator.assistant(),       # add bot turn to context
@@ -1475,8 +1540,15 @@ async def p3_dryrun(request: Request):
     Body: {"uid": "<firebase_uid>", "turns": ["...", "..."], "verbose": true}
     Guard with ADMIN_TOKEN (?token=...) — it spends Groq tokens.
     """
+    # FAIL CLOSED. This endpoint spends Groq tokens on request, so unlike
+    # /reprocess it refuses outright when ADMIN_TOKEN is unset rather than
+    # falling open. It is test tooling that happens to live in production.
     admin = (os.getenv("ADMIN_TOKEN") or "").strip()
-    if admin and request.query_params.get("token") != admin:
+    if not admin:
+        return JSONResponse(
+            {"error": "disabled: set ADMIN_TOKEN to enable /p3/dryrun"},
+            status_code=403)
+    if request.query_params.get("token") != admin:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         body = await request.json()
