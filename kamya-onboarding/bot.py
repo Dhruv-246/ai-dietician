@@ -982,17 +982,24 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # llama-3.3-70b-versatile was decommissioned 2026-08-16; this is Groq's
         # recommended replacement. Alternative: qwen/qwen3.6-27b.
         groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-        # Hard ceiling on reply length. Measured on 2026-08-17: replies of 211
-        # chars had Mira speaking for 12-19 seconds unbroken, which is punishing
-        # on a phone call regardless of how fast TTS is. The prompt asks for
-        # 1-2 sentences; this is the backstop for when it doesn't listen.
-        # ~120 tokens is roughly three spoken sentences of Hinglish.
-        _max_tok = int(os.getenv("LLM_MAX_TOKENS", "120"))
-        _log(f"llm=groq model={groq_model} max_tokens={_max_tok} room={room_name}")
+        # gpt-oss is a REASONING model: it spends completion tokens thinking
+        # before it writes anything. Measured 2026-08-22 via /p3/dryrun —
+        #   max_tokens=120, default effort -> 118 of 120 tokens were reasoning,
+        #   finish_reason=length, content EMPTY. Mira said nothing at all.
+        # reasoning_effort=low drops that to ~10 tokens and the reply arrives
+        # in ~40 total. So: cap generously, and buy brevity with effort rather
+        # than with a token ceiling. Length is controlled by the prompt and by
+        # the thread machine's per-stage word budgets, which the model follows.
+        _max_tok = int(os.getenv("LLM_MAX_TOKENS", "400"))
+        _effort = (os.getenv("LLM_REASONING_EFFORT", "low") or "").strip()
+        _extra = {"reasoning_effort": _effort} if _effort else {}
+        _log(f"llm=groq model={groq_model} max_tokens={_max_tok} "
+             f"reasoning_effort={_effort or 'default'} room={room_name}")
         llm = GroqLLMService(
             api_key=os.getenv("GROQ_API_KEY"),
             settings=GroqLLMService.Settings(model=groq_model,
-                                             max_tokens=_max_tok),
+                                             max_tokens=_max_tok,
+                                             extra=_extra),
         )
 
     # TTS engine selection. TTS_ENGINE env:
@@ -1515,8 +1522,8 @@ def _dryrun_sync(uid, turns, overrides=None):
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     overrides = overrides or {}
     model = overrides.get("model") or os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    max_tok = int(overrides.get("max_tokens") or os.getenv("LLM_MAX_TOKENS", "120"))
-    effort = overrides.get("reasoning_effort")
+    max_tok = int(overrides.get("max_tokens") or os.getenv("LLM_MAX_TOKENS", "400"))
+    effort = overrides.get("reasoning_effort") or os.getenv("LLM_REASONING_EFFORT", "low")
 
     threads, history, out_rows = [], [], []
 
