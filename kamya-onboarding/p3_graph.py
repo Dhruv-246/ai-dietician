@@ -151,12 +151,17 @@ with what the user said."
 A symptom is almost always caused by something EARLIER, not by itself. Look
 UPSTREAM of the complaint:
    night hunger      -> what and when DINNER was (the cause), not what they
-                        snack on at night (that is the symptom restated)
+                        snack on at night (that is the symptom restated);
+                        lifestyle.sleep_time matters too, because dinner time
+                        plus sleep time is what defines how long they are
+                        awake and hungry
+   trouble sleeping  -> when they eat and when they sleep
    afternoon slump   -> breakfast and lunch, not the slump
    bloating at night -> what the evening meal contains
    no energy in gym  -> the meal before the workout
 
-Prefer what and when they EAT. Do NOT choose identity.basics.* or
+Prefer what and when they EAT, and when the complaint involves nights, sleep
+or energy, WHEN THEY SLEEP (lifestyle.sleep_time) is usually one of the three. Do NOT choose identity.basics.* or
 identity.body.* unless the problem is literally about age or body
 measurements. Do not request a fact you could not act on.
 
