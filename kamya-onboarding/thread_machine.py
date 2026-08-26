@@ -388,16 +388,22 @@ def stage_directive(thread, gather):
     elif st == S_REFLECT:
         known = ", ".join(f"{_humanise(k)}={v}" for k, v in
                           list(gather["known"].items())[:5])
-        d = ("Say the problem back in your own words, using the specifics below, "
-             "so they feel heard. Do NOT ask a question in this turn.")
+        # A bare restatement is a WASTED TURN. Observed live: Mira replied
+        # "समझा, तुम 7 pm को दो रोटी+सब्ज़ी dinner लेते हो, फिर 11 pm को सोते हो"
+        # and stopped, so the user had to ask "जी, क्या करूं मैं?" to get
+        # anywhere. Reflection must always carry the conversation forward.
+        d = ("Reflect what they told you back in ONE short clause so they feel "
+             "heard, then IMMEDIATELY carry it forward in the same breath — name "
+             "what you think is going on. Do NOT simply repeat their words and "
+             "stop, and do NOT ask a question in this turn.")
         if known:
             d += f" What you know: {known}."
-        # When the picture is already clear, forcing reflection and advice into
-        # separate turns is the ceremony that makes a graph feel like a graph.
-        if len(gather["known"]) >= 2 and not gather["missing"]:
-            d += (" The picture is already clear, so you MAY name the likely reason "
-                  "and give one concrete suggestion in this same short reply if that "
-                  "flows naturally — do not stretch it over two turns artificially.")
+        # Only hold advice back while the picture is genuinely thin. Two known
+        # facts is enough to act on — stretching a clear answer over two turns
+        # is the ceremony that makes a graph feel like a graph.
+        if len(gather["known"]) >= 2:
+            d += (" The picture is clear enough, so give the one concrete "
+                  "suggestion in this same reply rather than making them ask for it.")
         if gather["stale"]:
             first = _humanise(gather["stale"][0])
             d += (f" You believe {first} is still true but it is a little old — "
