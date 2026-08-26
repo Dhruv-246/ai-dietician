@@ -14,4 +14,9 @@ uvicorn
 gspread>=6.0.0
 google-auth>=2.0.0
 
+# P-3 thread machine: routes each turn and drives one conversational
+# thread. Runs inside ONE Pipecat processor; it never owns the turn
+# lifecycle or the generation call.
+langgraph
+
 python-dotenv

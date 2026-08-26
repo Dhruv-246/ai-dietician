@@ -101,6 +101,7 @@ import onboarding_nodes
 import rag
 import rag_query
 import stt_vocab
+import thread_machine
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
 # is no .env — the platform injects the variables into the environment directly.
@@ -647,6 +648,139 @@ class TranscriptGate(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class ThreadMachineProcessor(FrameProcessor):
+    """P-3 thread machine. Replaces RAGProcessor for ongoing calls.
+
+    WHERE LANGGRAPH STARTS AND ENDS
+        Starts on a final TranscriptionFrame, ends by producing a DIRECTIVE.
+        It does NOT generate Mira's reply — the existing Pipecat LLM service
+        still does that, so streaming into TTS and context aggregation are
+        untouched, and there is still exactly ONE generation call per turn.
+
+    HOW THE DIRECTIVE REACHES THE MODEL
+        Same mechanism RAGProcessor uses: a separate system message appended
+        at the end of context, immediately before the user's utterance (the
+        aggregator adds that after us). messages[0] — the personality, the
+        Hinglish rules, the safety framing — is never touched. Exactly one
+        block ever exists; the previous one is stripped first.
+
+    INTERRUPTION
+        Nothing is committed during generation. Stage advances and memory ops
+        are staged in `self._pending` and applied only when
+        BotStoppedSpeakingFrame arrives, i.e. once the user has actually heard
+        the reply. Barge-in therefore rolls the turn back rather than
+        recording advice nobody heard.
+    """
+
+    MARKER = "[[MIRA-TURN-POLICY]]"
+
+    def __init__(self, context, *, firebase_uid="", ledger_view=None,
+                 fact_ages=None):
+        super().__init__()
+        self._context = context
+        self._uid = firebase_uid
+        self._ledger_view = ledger_view or {}
+        self._fact_ages = fact_ages or {}
+        self._threads = []
+        self._turn = 0
+        self._pending = None
+        self._graph = None
+
+    # -- context plumbing --------------------------------------------------
+    def _strip_policy(self, msgs):
+        return [m for m in msgs
+                if not (isinstance(m, dict)
+                        and isinstance(m.get("content"), str)
+                        and m["content"].startswith(self.MARKER))]
+
+    def _history(self, msgs):
+        return [{"role": m.get("role"), "content": m.get("content")}
+                for m in msgs
+                if m.get("role") in ("user", "assistant")
+                and isinstance(m.get("content"), str)][-6:]
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+
+        # Commit point. Fires once the reply has actually been spoken.
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            self._commit()
+
+        if (
+            direction == FrameDirection.DOWNSTREAM
+            and isinstance(frame, TranscriptionFrame)
+            and (getattr(frame, "text", "") or "").strip()
+        ):
+            try:
+                await self._run(frame.text.strip())
+            except Exception as exc:
+                # Never break a call over the graph. Falling through leaves the
+                # base prompt alone, which is exactly the old P-3 behaviour.
+                _log(f"thread machine failed ({type(exc).__name__}): {exc}")
+        await self.push_frame(frame, direction)
+
+    # -- the turn ----------------------------------------------------------
+    async def _run(self, text):
+        if self._graph is None:
+            import p3_graph
+            self._graph = p3_graph.get_graph()
+
+        msgs = self._strip_policy(self._context.get_messages())
+        self._turn += 1
+
+        out = await self._graph.ainvoke({
+            "turn_text": text,
+            "turn_index": self._turn,
+            "threads": list(self._threads),
+            "ledger_view": self._ledger_view,
+            "fact_ages": self._fact_ages,
+            "history": self._history(msgs),
+            "trace": [],
+        })
+
+        for line in out.get("trace", []):
+            _log(f"  graph: {line}")
+
+        # Safety short-circuit: speak the fixed line, run no LLM at all.
+        if out.get("safety_hit"):
+            self._context.set_messages(msgs)
+            await self.push_frame(TTSSpeakFrame(out["safety_hit"]),
+                                  FrameDirection.DOWNSTREAM)
+            self._pending = None
+            return
+
+        block = self.MARKER + "\n" + (out.get("directive") or "")
+        docs = out.get("retrieved") or []
+        if docs:
+            block += "\n\n" + rag.format_reference(docs)
+        msgs.append({"role": "system", "content": block})
+        self._context.set_messages(msgs)
+
+        # Staged, not applied. See INTERRUPTION above.
+        self._pending = {
+            "threads": out.get("threads", self._threads),
+            "stage": out.get("stage"),
+            "lane": out.get("lane"),
+        }
+
+    def _commit(self):
+        if not self._pending:
+            return
+        self._threads = self._pending["threads"]
+        active = next((t for t in self._threads if not t.parked), None)
+        if active and self._pending.get("stage") == thread_machine.S_ADVISE:
+            active.advice.append(active.topic)
+        _log(f"  graph: COMMIT lane={self._pending.get('lane')} "
+             f"stage={self._pending.get('stage')} threads={len(self._threads)}")
+        self._pending = None
+
+    # -- end of call -------------------------------------------------------
+    def open_loops(self):
+        """Unfinished threads become open loops for the next call."""
+        return [thread_machine.open_loop_text(t) for t in self._threads
+                if t.stage != thread_machine.S_CLOSE]
+
+
 class RAGProcessor(FrameProcessor):
     """RAG injection. Sits between STT and the user aggregator.
 
@@ -733,7 +867,7 @@ class RAGProcessor(FrameProcessor):
 async def run_livekit_bot(room_name: str, system_prompt: str, *,
                           firebase_uid=None, user_id="", run_id="",
                           mode="onboarding", existing_memory=None, existing_open_loops=None,
-                          profile=None):
+                          profile=None, fact_ages=None):
     """Join `room_name` as Mira, run the conversation, then consolidate memory."""
     _log(f"bot starting room={room_name} mode={mode} prompt_chars={len(system_prompt)}")
     _onboarding_profile = profile or {}
@@ -979,6 +1113,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # the node machine, RAG, or the LLM. Applies to BOTH modes.
         TranscriptGate(),
     ]
+    thread_proc = None
     if mode == "onboarding":
         # Onboarding: node-based state machine controls the call flow.
         # Each node has its own focused prompt; code drives transitions.
@@ -986,15 +1121,28 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         node_proc = onboarding_nodes.create_node_processor(context, _onboarding_profile, log_fn=_log)
         _log(f"onboarding node system enabled room={room_name}")
         stages.append(node_proc)
-    elif rag.enabled():
-        _log(f"rag enabled room={room_name} top_k={os.getenv('RAG_TOP_K', '3')}")
-        stages.append(RAGProcessor(
-            context,
-            top_k=int(os.getenv("RAG_TOP_K", "3")),
-            min_similarity=float(os.getenv("RAG_MIN_SIMILARITY", "0.5")),
-        ))
     else:
-        _log(f"rag disabled room={room_name} (no supabase/google key)")
+        # P-3. P3_ENGINE=graph (default) runs the thread machine; P3_ENGINE=rag
+        # falls back to the previous single-prompt + retrieval behaviour, so
+        # the two can be compared without a redeploy.
+        _p3 = os.getenv("P3_ENGINE", "graph").strip().lower()
+        if _p3 == "graph":
+            thread_proc = ThreadMachineProcessor(
+                context, firebase_uid=firebase_uid or "",
+                ledger_view=existing_memory or {}, fact_ages=fact_ages or {},
+            )
+            _log(f"p3 thread machine enabled room={room_name} "
+                 f"ledger_paths={len(fact_ages or {})} rag={rag.enabled()}")
+            stages.append(thread_proc)
+        elif rag.enabled():
+            _log(f"p3 rag-only (P3_ENGINE=rag) room={room_name} top_k={os.getenv('RAG_TOP_K', '3')}")
+            stages.append(RAGProcessor(
+                context,
+                top_k=int(os.getenv("RAG_TOP_K", "3")),
+                min_similarity=float(os.getenv("RAG_MIN_SIMILARITY", "0.5")),
+            ))
+        else:
+            _log(f"p3 plain prompt room={room_name} (no supabase/google key)")
     stages += [
         aggregator.user(),            # add user turn to context
         llm,                          # reasoning (sees any injected references)
@@ -1102,16 +1250,27 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
                         f["invalidated_by"] = closed_by[f["fact_id"]]
                 view = memory_facts.build_current_view(facts + new_rows)
 
+                # Threads left unfinished carry forward, so a topic the user
+                # switched away from is picked up next call instead of vanishing.
+                loops = list(patch["open_loops"])
+                if thread_proc is not None:
+                    for extra in thread_proc.open_loops():
+                        if extra not in loops:
+                            loops.append(extra)
+                    if len(loops) != len(patch["open_loops"]):
+                        _log(f"carried {len(loops) - len(patch['open_loops'])} "
+                             f"unfinished thread(s) into open loops")
+
                 memory_store.cache_current_view(
                     firebase_uid=firebase_uid, view=view,
-                    open_loops=patch["open_loops"],
+                    open_loops=loops,
                     session_summary=patch["session_summary"],
                     ended_at=ended_at, session_type=mode,
                 )
                 memory_store.finalize_session(
                     run_id, status=memory_store.STATUS_DONE,
                     session_summary=patch["session_summary"],
-                    open_loops=patch["open_loops"],
+                    open_loops=loops,
                     consolidated_at=datetime.now(timezone.utc).isoformat(),
                 )
                 applied = sum(1 for a in audit if a.get("applied"))
@@ -1945,6 +2104,19 @@ async def connect(request: Request):
     memory = memory_store.load_memory(firebase_uid) if firebase_uid else {}
     user_id = memory.get("user_id", "") if memory else ""
 
+    # Age of each known fact, for the thread machine's staleness check. Read
+    # once here, never on the audio path — the live turn only ever touches the
+    # cached projection, so this costs nothing per turn.
+    fact_ages = {}
+    if firebase_uid and mode != "onboarding":
+        try:
+            for f in await asyncio.to_thread(memory_store.load_facts, firebase_uid):
+                if f.get("status") == memory_facts.STATUS_APPLIED and not \
+                        str(f.get("invalidated_at", "")).strip():
+                    fact_ages[f.get("path")] = f.get("valid_from") or f.get("created_at")
+        except Exception as exc:
+            _log(f"fact ages unavailable: {exc}")
+
     system_prompt = build_system_prompt(mode, profile, memory)
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     _log(
@@ -1962,6 +2134,7 @@ async def connect(request: Request):
         firebase_uid=firebase_uid, user_id=user_id, run_id=run_id,
         mode=mode, existing_memory=(memory or {}).get("long_term_memory", {}),
         existing_open_loops=(memory or {}).get("open_loops", []),
+        fact_ages=fact_ages,
         profile=profile,
     ))
 
