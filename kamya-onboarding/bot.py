@@ -1476,19 +1476,24 @@ async def p3_dryrun(request: Request):
     except Exception:
         body = {}
     turns = [str(t) for t in (body or {}).get("turns", []) if str(t).strip()]
+    overrides = {
+        "max_tokens": (body or {}).get("max_tokens"),
+        "reasoning_effort": (body or {}).get("reasoning_effort"),
+        "model": (body or {}).get("model"),
+    }
     if not turns:
         return JSONResponse({"error": "pass {\"turns\": [\"...\"]}"}, status_code=400)
     uid = str((body or {}).get("uid") or "").strip()
 
     try:
-        return await asyncio.to_thread(_dryrun_sync, uid, turns[:20])
+        return await asyncio.to_thread(_dryrun_sync, uid, turns[:20], overrides)
     except Exception as exc:
         import traceback
         return JSONResponse({"error": str(exc),
                              "trace": traceback.format_exc()[-1500:]}, status_code=500)
 
 
-def _dryrun_sync(uid, turns):
+def _dryrun_sync(uid, turns, overrides=None):
     """Blocking body of /p3/dryrun. Mirrors the real turn path exactly."""
     import time
     import p3_graph
@@ -1508,7 +1513,10 @@ def _dryrun_sync(uid, turns):
     base_prompt = build_system_prompt("ongoing", profile, memory)
     graph = p3_graph.get_graph()
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    overrides = overrides or {}
+    model = overrides.get("model") or os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    max_tok = int(overrides.get("max_tokens") or os.getenv("LLM_MAX_TOKENS", "120"))
+    effort = overrides.get("reasoning_effort")
 
     threads, history, out_rows = [], [], []
 
@@ -1560,12 +1568,19 @@ def _dryrun_sync(uid, turns):
             msgs.append({"role": "user", "content": text})
             t1 = time.perf_counter()
             try:
-                resp = client.chat.completions.create(
-                    model=model, messages=msgs,
-                    max_tokens=int(os.getenv("LLM_MAX_TOKENS", "120")),
-                    temperature=0.7,
-                )
-                reply = (resp.choices[0].message.content or "").strip()
+                kw = dict(model=model, messages=msgs,
+                          max_tokens=max_tok, temperature=0.7)
+                if effort:
+                    kw["reasoning_effort"] = effort
+                resp = client.chat.completions.create(**kw)
+                choice = resp.choices[0]
+                reply = (choice.message.content or "").strip()
+                row["finish_reason"] = getattr(choice, "finish_reason", None)
+                usage = getattr(resp, "usage", None)
+                row["completion_tokens"] = getattr(usage, "completion_tokens", None)
+                row["reasoning_tokens"] = getattr(
+                    getattr(usage, "completion_tokens_details", None),
+                    "reasoning_tokens", None)
             except Exception as exc:
                 reply = f"[LLM ERROR: {exc}]"
             row["llm_ms"] = round((time.perf_counter() - t1) * 1000, 1)
@@ -1584,6 +1599,8 @@ def _dryrun_sync(uid, turns):
         "base_prompt_chars": len(base_prompt),
         "router_model": p3_graph._ROUTER_MODEL,
         "compose_model": model,
+        "max_tokens": max_tok,
+        "reasoning_effort": effort,
         "turns": out_rows,
         "note": "READ-ONLY — no memory, ledger or session writes were performed.",
     }
