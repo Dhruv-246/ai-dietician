@@ -60,6 +60,15 @@ SCHEMA = {
     "goals.motivation": "scalar",
     "goals.target": "scalar",
     "lifestyle.schedule": "scalar",
+    # Sibling scalar, not a child of lifestyle.schedule. `schedule` already
+    # holds a plain string ("office 10-7"); nesting under it would change a
+    # scalar into a parent and break every value already stored there, plus
+    # _read_path/_assign which assume the leaf is the value. Flat also matches
+    # the rest of this family, and later needs (wake_time, sleep_quality) are
+    # siblings rather than another nesting decision.
+    # Distinct from current_pattern.late_night.time, which is when they EAT
+    # late — this is when they SLEEP.
+    "lifestyle.sleep_time": "scalar",
     "lifestyle.cooking_situation": "scalar",
     "lifestyle.household": "scalar",
     "lifestyle.budget": "scalar",

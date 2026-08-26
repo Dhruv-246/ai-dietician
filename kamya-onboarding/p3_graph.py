@@ -164,13 +164,16 @@ ALLOWED PATHS
 {_PATHS}
 
 adhoc — at most ONE, only for something the schema genuinely cannot express
-(e.g. "sleep timing", "stress at work"). Never restate the topic as adhoc.
+(e.g. "stress at work"). Sleep timing IS in the schema now
+(lifestyle.sleep_time) — use the path, never adhoc. Never restate the topic
+as adhoc.
 
 =====================  extracted  =====================
 Anything the user told you IN THIS TURN, keyed by the EXACT schema path.
    "सात बजे dinner करती हूँ"  -> {{"current_pattern.dinner.time": "7pm"}}
    "दो roti और sabzi"        -> {{"current_pattern.dinner.frequent": "roti, sabzi"}}
    "मुझे PCOS है"             -> {{"health.conditions": "PCOS"}}
+   "ग्यारह बजे सोती हूँ"        -> {{"lifestyle.sleep_time": "11pm"}}
 Never ask again for anything you put here, and never list it in needed_paths.
 Empty object if they gave no new fact.
 

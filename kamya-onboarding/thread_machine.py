@@ -188,6 +188,8 @@ _LEAF_SYNONYMS = {
     "likes": {"like", "likes", "prefers", "favourite", "favorite"},
     "dislikes": {"dislike", "dislikes", "hates", "hate"},
     "schedule": {"schedule", "routine", "shift", "work", "office", "job"},
+    "sleep_time": {"sleep", "sleeps", "sleeping", "bedtime", "sona", "sote",
+                   "soti", "sone", "nind", "neend"},
     "cooking_situation": {"cooking", "cook", "cooks", "kitchen"},
     "struggles": {"struggle", "struggles", "difficulty", "hard", "problem"},
     "what_failed": {"failed", "fail", "didnt", "unsuccessful"},
