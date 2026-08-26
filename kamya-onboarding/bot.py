@@ -1453,6 +1453,142 @@ def _reprocess_sync(session_id=None, limit=10):
     return results
 
 
+@app.post("/p3/dryrun")
+async def p3_dryrun(request: Request):
+    """Run the P-3 thread machine over scripted turns — REAL router, REAL LLM,
+    no audio.
+
+    TEST TOOLING, NOT A PRODUCT SURFACE. It exists because router quality and
+    real latency cannot be observed any other way without making live calls,
+    and live calls burn TTS credit.
+
+    STRICTLY READ-ONLY: nothing is written to the ledger, the users row or the
+    Sessions tab. STT and TTS are never invoked.
+
+    Body: {"uid": "<firebase_uid>", "turns": ["...", "..."], "verbose": true}
+    Guard with ADMIN_TOKEN (?token=...) — it spends Groq tokens.
+    """
+    admin = (os.getenv("ADMIN_TOKEN") or "").strip()
+    if admin and request.query_params.get("token") != admin:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    turns = [str(t) for t in (body or {}).get("turns", []) if str(t).strip()]
+    if not turns:
+        return JSONResponse({"error": "pass {\"turns\": [\"...\"]}"}, status_code=400)
+    uid = str((body or {}).get("uid") or "").strip()
+
+    try:
+        return await asyncio.to_thread(_dryrun_sync, uid, turns[:20])
+    except Exception as exc:
+        import traceback
+        return JSONResponse({"error": str(exc),
+                             "trace": traceback.format_exc()[-1500:]}, status_code=500)
+
+
+def _dryrun_sync(uid, turns):
+    """Blocking body of /p3/dryrun. Mirrors the real turn path exactly."""
+    import time
+    import p3_graph
+    from groq import Groq
+
+    profile = load_profile_for_call(uid) if uid else {}
+    memory = memory_store.load_memory(uid) if uid else {}
+    ledger_view = (memory or {}).get("long_term_memory") or {}
+
+    fact_ages = {}
+    if uid:
+        for f in memory_store.load_facts(uid):
+            if f.get("status") == memory_facts.STATUS_APPLIED and not \
+                    str(f.get("invalidated_at", "")).strip():
+                fact_ages[f.get("path")] = f.get("valid_from") or f.get("created_at")
+
+    base_prompt = build_system_prompt("ongoing", profile, memory)
+    graph = p3_graph.get_graph()
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+
+    threads, history, out_rows = [], [], []
+
+    for i, text in enumerate(turns, 1):
+        t0 = time.perf_counter()
+        state = asyncio.run(graph.ainvoke({
+            "turn_text": text, "turn_index": i, "threads": threads,
+            "ledger_view": ledger_view, "fact_ages": fact_ages,
+            "history": list(history), "trace": [],
+        }))
+        graph_ms = (time.perf_counter() - t0) * 1000
+        threads = state.get("threads", threads)
+
+        row = {
+            "turn": i, "user": text,
+            "lane": state.get("lane"), "situation": state.get("situation"),
+            "stage": state.get("stage"),
+            "graph_ms": round(graph_ms, 1),
+            "trace": state.get("trace", []),
+            "retrieved": len(state.get("retrieved") or []),
+        }
+        active = next((t for t in threads if not t.parked), None)
+        row["thread"] = None if not active else {
+            "topic": active.topic, "stage": active.stage,
+            "slots": dict(active.slots), "gaps": active.gaps(),
+        }
+        row["parked"] = [t.topic for t in threads if t.parked]
+        g = state.get("gather") or {}
+        row["needed"] = list(active.needed_paths) + list(active.adhoc) if active else []
+        row["known_from_memory"] = list((g.get("known") or {}).keys())
+        row["stale"] = g.get("stale") or []
+        row["missing"] = g.get("missing") or []
+        row["directive"] = state.get("directive")
+        row["budget_words"] = state.get("budget")
+        row["may_advise"] = state.get("may_advise")
+
+        if state.get("safety_hit"):
+            row["mira"] = state["safety_hit"]
+            row["llm_ms"] = 0
+            row["safety"] = True
+        else:
+            msgs = [{"role": "system", "content": base_prompt}]
+            msgs += history
+            block = (state.get("directive") or "")
+            docs = state.get("retrieved") or []
+            if docs:
+                block += "\n\n" + rag.format_reference(docs)
+            msgs.append({"role": "system", "content": block})
+            msgs.append({"role": "user", "content": text})
+            t1 = time.perf_counter()
+            try:
+                resp = client.chat.completions.create(
+                    model=model, messages=msgs,
+                    max_tokens=int(os.getenv("LLM_MAX_TOKENS", "120")),
+                    temperature=0.7,
+                )
+                reply = (resp.choices[0].message.content or "").strip()
+            except Exception as exc:
+                reply = f"[LLM ERROR: {exc}]"
+            row["llm_ms"] = round((time.perf_counter() - t1) * 1000, 1)
+            row["mira"] = reply
+            row["safety"] = False
+
+        row["words"] = len(str(row["mira"]).split())
+        row["total_ms"] = round(row["graph_ms"] + row["llm_ms"], 1)
+        history += [{"role": "user", "content": text},
+                    {"role": "assistant", "content": row["mira"]}]
+        out_rows.append(row)
+
+    return {
+        "uid": uid or None,
+        "ledger_paths_known": len(fact_ages),
+        "base_prompt_chars": len(base_prompt),
+        "router_model": p3_graph._ROUTER_MODEL,
+        "compose_model": model,
+        "turns": out_rows,
+        "note": "READ-ONLY — no memory, ledger or session writes were performed.",
+    }
+
+
 @app.get("/audit")
 async def audit(request: Request):
     """Why does Mira believe this? The full fact ledger for one user.
