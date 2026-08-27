@@ -18,6 +18,7 @@ import llm_client as L          # noqa: E402
 import memory_facts as mf       # noqa: E402
 import onboarding_nodes as on   # noqa: E402
 import rag_query as rq          # noqa: E402
+import reply_shape              # noqa: E402
 import thread_machine as tm     # noqa: E402
 
 R = []
@@ -221,6 +222,68 @@ def test_onboarding():
 
 
 # ------------------------------------------------------------ reply shape --
+def _shape(chunks, cap=32):
+    """Run a streamed reply through the shaper; return what TTS would speak."""
+    sh = reply_shape.ReplyShaper(word_cap=cap)
+    out = []
+    for c in chunks:
+        keep, stop = sh.feed(c)
+        if keep:
+            out.append(keep)
+        if stop:
+            break
+    return "".join(out), sh
+
+
+def test_reply_shape():
+    # Tokens arrive in small pieces, so every rule has to hold mid-chunk.
+    spoken, sh = _shape(["अच्छा", ", दिल्ली", " में! और work", " क्या करते हैं", " आप?"])
+    ck("a normal reply passes through untouched",
+       spoken == "अच्छा, दिल्ली में! और work क्या करते हैं आप?", spoken)
+    ck("the question mark survives", spoken.endswith("?"))
+
+    # The failure this whole filter exists for: eleven questions in one breath.
+    spoken, _ = _shape(["breakfast में क्या खाते हैं?",
+                        " और lunch?", " और dinner?", " और chai?"])
+    ck("everything after the first question is dropped",
+       spoken.count("?") == 1 and spoken == "breakfast में क्या खाते हैं?", spoken)
+
+    # Split across chunks, which is how it actually arrives.
+    spoken, _ = _shape(["आप क्या खाते", " हैं", "?", " और कब", "?"])
+    ck("one question survives a mark that arrives as its own chunk",
+       spoken.count("?") == 1 and spoken == "आप क्या खाते हैं?", spoken)
+
+    # THE REGRESSION THIS REFACTOR FIXES. Mira's question is the LAST sentence,
+    # so a word cap that cuts at a sentence boundary drops the question and
+    # leaves a reply that only makes statements -- which stalls the call.
+    long_pre = ["यह एक बहुत लंबा वाक्य है जो cap से आगे निकल जाता है. " * 4,
+                "तो dinner कितने बजे करते हैं?"]
+    spoken, sh = _shape(long_pre, cap=10)
+    ck("an over-cap reply still ends with its question",
+       spoken.rstrip().endswith("?"), spoken[-60:])
+    ck("the question is never dropped to satisfy the cap",
+       "dinner कितने बजे करते हैं?" in spoken)
+    ck("over-cap is reported for logging, not silently truncated",
+       sh.overlong() is True)
+
+    # A model that never punctuates must still be stopped eventually.
+    spoken, sh = _shape(["शब्द " * 200], cap=10)
+    ck("unpunctuated runaway is cut", sh.cut and sh.reason == "unpunctuated runaway")
+
+    # And the cap must not fire on ordinary variation.
+    spoken, sh = _shape(["ठीक है. और lunch कितने बजे होता है आप का?"], cap=32)
+    ck("a short reply is not touched by the runaway guard",
+       sh.reason == "question asked" and spoken.endswith("?"))
+
+    sh2 = reply_shape.ReplyShaper(word_cap=32)
+    sh2.feed("पहला सवाल?")
+    sh2.reset()
+    keep, stop = sh2.feed("दूसरा reply")
+    ck("reset clears the cut so the next reply is not swallowed",
+       keep == "दूसरा reply" and not stop, (keep, stop))
+
+
+
 def test_prompt_invariants():
     """Rules earned from real calls. Each one cost a live call to find."""
     g = on.GLOBAL_RULES
@@ -286,7 +349,7 @@ def test_bedrock_falls_back():
 
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
-               test_rag_gate, test_onboarding, test_prompt_invariants,
+               test_rag_gate, test_onboarding, test_reply_shape, test_prompt_invariants,
                test_bedrock_falls_back):
         fn()
     passed = sum(1 for _, c, _ in R if c)

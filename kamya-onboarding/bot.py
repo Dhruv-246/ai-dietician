@@ -107,6 +107,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 import consolidate
 import llm_client
+import reply_shape
 import memory_facts
 import memory_store
 import onboarding_nodes
@@ -845,114 +846,58 @@ class ThreadMachineProcessor(FrameProcessor):
 
 
 class ReplyShapeFilter(FrameProcessor):
-    """Physically bound what Mira says: ONE question, and one or two lines.
+    """Physically bound what Mira says: ONE question, and not a speech.
 
-    Two separate failures, one mechanism, because both were asked for in prose
-    and ignored.
+    The shaping decisions live in `reply_shape.ReplyShaper`, which imports no
+    pipecat and is unit-tested directly. This class is only the frame plumbing.
 
-    QUESTION STACKING. A live onboarding call produced this as ONE utterance:
+    Both rules were asked for in prose and ignored -- GLOBAL_RULES said "ONE
+    question at a time", the node prompts said "never read these as a list",
+    and a live call still produced eleven questions in one breath, verbatim
+    from the prompt's own examples.
 
-      "...आप weight loss से क्या achieve करना चाहते हैं?थोड़ा और बताइए?अभी sign
-       up करने का मन कैसे किया?...पहले कभी कुछ try किया था?...कहाँ अटक रहा है?"
+    On why the two cuts are not symmetrical -- and why going over the word cap
+    before the question is deliberately NOT cut -- see reply_shape.py.
 
-    and eleven questions in a row at DAILY_EATING — verbatim the example
-    questions from the node prompts, recited as a script. The DAILY_EATING
-    prompt already said "Ask ONE meal at a time" AND "Never read these as a
-    list", and GLOBAL_RULES already said "ONE question at a time". Three
-    instructions, all ignored.
-
-    LENGTH. Also prose only: GLOBAL_RULES said "1-2 short sentences, ~25 words
-    max", the P-3 stage budgets said "keep it under N words", and
-    ResponseValidator logged "too long" without ever withholding anything. The
-    same call still produced questions running several lines.
-
-    So both are enforced here instead. Everything after the first question
-    mark is dropped, and length is cut at a SENTENCE BOUNDARY past the cap —
-    never mid-word, because a reply chopped inside a word sounds broken, which
-    is worse than a slightly long one. A hard stop at twice the cap catches a
-    model that never punctuates at all.
-
-    Streaming-safe: frames pass straight through until a cut, so nothing is
+    Streaming-safe: chunks pass straight through until a cut, so nothing is
     buffered and no latency is added.
     """
-
-    _SENT_END = ("।", ".", "?", "!")
 
     def __init__(self, label="", word_cap=40, restore_question_mark=False):
         super().__init__()
         self._label = label
-        self._cap = word_cap
+        self._shaper = reply_shape.ReplyShaper(word_cap=word_cap)
         # Only true when the LLM runs with stop=["?"], which eats the mark.
         # Appending one unconditionally would put a "?" on the CLOSE node's
         # farewell, which is a statement and must stay one.
         self._restore_q = restore_question_mark
-        self._cut = False
-        self._dropped = 0
-        self._words = 0
-        self._reason = ""
-        self._sent = False              # did we emit any text this response?
-        self._sent_end_punct = False    # did it already end in punctuation?
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
         if direction == FrameDirection.DOWNSTREAM:
+            sh = self._shaper
             if isinstance(frame, LLMFullResponseStartFrame):
-                self._cut, self._dropped, self._words = False, 0, 0
-                self._reason = ""
-                self._sent, self._sent_end_punct = False, False
+                sh.reset()
             elif isinstance(frame, LLMFullResponseEndFrame):
-                # The model is run with stop=["?"], which ends generation at the
-                # first question mark AND strips it. Put it back so TTS speaks
-                # the sentence with question intonation rather than flatly.
-                # Pushed BEFORE the End frame so it joins the pending sentence.
-                if self._restore_q and self._sent and not self._sent_end_punct:
+                if self._restore_q and sh.sent_any and not sh.ends_punctuated:
                     await self.push_frame(LLMTextFrame("?"), direction)
-                # Log whenever the filter BOUND the reply, even if zero chars
-                # were dropped — a cut that lands exactly on the last sentence
-                # still means the cap was doing the work, and that rate is
-                # what tells you whether the prompts are pulling their weight.
-                if self._cut:
-                    _log(f"  shape filter{self._label}: cut on {self._reason}, "
-                         f"dropped {self._dropped} chars "
-                         f"({self._words} words kept, cap {self._cap})")
-                self._cut, self._dropped, self._words = False, 0, 0
-                self._reason = ""
+                if sh.cut and sh.dropped:
+                    _log(f"  shape filter{self._label}: cut on {sh.reason}, "
+                         f"dropped {sh.dropped} chars "
+                         f"({sh.words} words kept, cap {sh._cap})")
+                elif sh.overlong():
+                    # Delivered in full on purpose. Worth counting, because a
+                    # rising rate here means the PROMPT is not holding and the
+                    # fix belongs there -- not in a harder truncation.
+                    _log(f"  shape filter{self._label}: over cap "
+                         f"({sh.words} words, cap {sh._cap}) -- delivered whole")
             elif isinstance(frame, LLMTextFrame):
-                text = getattr(frame, "text", "") or ""
-                if self._cut:
-                    self._dropped += len(text)
-                    return                      # suppress the rest of the reply
-
-                # 1. one question only
-                if "?" in text:
-                    keep = text[: text.index("?") + 1]
-                    self._dropped += len(text) - len(keep)
-                    self._cut, self._reason = True, "second question"
-                    self._words += len(keep.split())
-                    if keep:
-                        self._sent, self._sent_end_punct = True, True
-                        await self.push_frame(LLMTextFrame(keep), direction)
+                keep, stop = sh.feed(getattr(frame, "text", "") or "")
+                if keep:
+                    await self.push_frame(LLMTextFrame(keep), direction)
+                if stop or not keep:
                     return
-
-                # 2. length — finish the sentence in progress, then stop
-                self._words += len(text.split())
-                if text.strip():
-                    self._sent = True
-                    self._sent_end_punct = text.rstrip()[-1] in self._SENT_END
-                if self._words > self._cap:
-                    idx = max(text.rfind(c) for c in self._SENT_END)
-                    if idx >= 0:
-                        keep = text[: idx + 1]
-                        self._dropped += len(text) - len(keep)
-                        self._cut, self._reason = True, f"length>{self._cap}w"
-                        if keep:
-                            await self.push_frame(LLMTextFrame(keep), direction)
-                        return
-                    if self._words > self._cap * 2:
-                        # never punctuated — stop rather than run on forever
-                        self._dropped += len(text)
-                        self._cut, self._reason = True, "unpunctuated runaway"
-                        return
+                return
         await self.push_frame(frame, direction)
 
 
