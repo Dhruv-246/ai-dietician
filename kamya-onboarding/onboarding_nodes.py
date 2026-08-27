@@ -13,6 +13,8 @@ those as before.
 """
 from __future__ import annotations
 
+import json
+import os
 import re
 
 # --------------------------------------------------------------------------- #
@@ -355,6 +357,54 @@ EXIT_NODES = {
 # Global triggers — keyword-matched, handled by code, no LLM call.            #
 # Each trigger: list of regex patterns, scripted response, stay on node.       #
 # --------------------------------------------------------------------------- #
+# What each node must LEARN before it may advance, and where that information
+# lives in memory_facts.SCHEMA. Progression used to be driven purely by turn
+# counters — DAILY_EATING moved on after 4-8 exchanges whether or not it had
+# actually captured a single meal. Counting turns is not the same as
+# collecting information.
+#
+# `paths` are existing SCHEMA paths only — no new fields are invented, so
+# whatever onboarding learns is already in P-3's vocabulary.
+NODE_GOALS = {
+    "GREETING": {
+        "goal": "Just make them comfortable and confirm they can talk now.",
+        "paths": [],
+    },
+    "RAPPORT": {
+        "goal": "Get a feel for their day and routine — nothing clinical yet.",
+        "paths": ["lifestyle.schedule"],
+    },
+    "PROBLEM": {
+        "goal": "Understand what they actually want to change and why NOW, "
+                "in their own words, plus what they have already tried.",
+        "paths": ["goals.primary_goal", "goals.motivation",
+                  "progress.what_failed", "progress.struggles"],
+    },
+    "DAILY_EATING": {
+        "goal": "Learn what a normal day of eating looks like — roughly what "
+                "and when, across the day. Not every slot needs a value.",
+        "paths": ["current_pattern.morning.frequent", "current_pattern.morning.time",
+                  "current_pattern.lunch.frequent", "current_pattern.lunch.time",
+                  "current_pattern.evening.frequent",
+                  "current_pattern.dinner.frequent", "current_pattern.dinner.time"],
+        "min_paths": 3,
+    },
+    "LIFESTYLE": {
+        "goal": "Understand the practical constraints — work pattern, who "
+                "cooks, sleep timing.",
+        "paths": ["lifestyle.schedule", "lifestyle.cooking_situation",
+                  "lifestyle.household", "lifestyle.sleep_time"],
+        "min_paths": 2,
+    },
+    "SUPPORT_PREF": {
+        "goal": "Learn food likes and dislikes so plans are actually edible.",
+        "paths": ["preferences.likes", "preferences.dislikes", "preferences.cuisine"],
+        "min_paths": 1,
+    },
+    "CLOSE": {"goal": "Wrap up warmly.", "paths": []},
+}
+
+
 GLOBAL_TRIGGERS = [
     {
         "name": "DEFLECT",
@@ -431,6 +481,115 @@ GLOBAL_TRIGGERS = [
 # Pre-compile patterns for performance.
 for trigger in GLOBAL_TRIGGERS:
     trigger["_compiled"] = [re.compile(p, re.IGNORECASE) for p in trigger["patterns"]]
+
+
+# --------------------------------------------------------------------------- #
+# Node completion check — the ONE semantic judgement in onboarding.            #
+# --------------------------------------------------------------------------- #
+# Everything else here is deterministic. This asks a small model one question:
+# "given the node's goal and what we already captured, did this turn add
+# anything, and do we now have enough?" It returns a decision; CODE decides
+# the transition. The model can never change the node.
+#
+# One call per user turn, same small/low-reasoning model as the P-3 router, on
+# a hard timeout. On any failure it returns "no useful info, not complete",
+# which degrades to the old turn-count behaviour rather than breaking the call.
+
+_CHECK_MODEL = os.getenv("P2_CHECK_MODEL", "openai/gpt-oss-20b")
+_CHECK_TIMEOUT = float(os.getenv("P2_CHECK_TIMEOUT", "4.0"))
+
+_CHECK_SYSTEM = """\
+You assess ONE turn of a dietician's onboarding call. You never speak to the
+user. Return JSON only:
+
+{
+  "useful": true|false,
+  "off_topic": true|false,
+  "extracted": {"<schema path>": "<value>"},
+  "status": "COMPLETE"|"INCOMPLETE",
+  "missing": ["<what is still needed, plain words>"]
+}
+
+useful    — did this turn add ANY real information toward the goal?
+            "हम्म", "पता नहीं", "अच्छा", silence, or an unclear/garbled
+            transcript are NOT useful. A partial answer IS useful.
+off_topic — true if they asked their own unrelated question instead of
+            answering (e.g. "क्या मैं rice खा सकता हूँ?"). Then useful=false.
+extracted — anything they stated, keyed by the EXACT schema path from
+            ALLOWED PATHS. Only what they actually said. Omit if nothing.
+status    — COMPLETE when the goal is covered well enough to move on. A
+            dietician does not need every detail; enough to work with is
+            enough. INCOMPLETE otherwise.
+missing   — the most useful thing still absent, in plain words. Empty when
+            COMPLETE.
+
+Output JSON only."""
+
+
+async def check_node_complete(node_name, goal, paths, extracted, user_text, mira_last=""):
+    """Return a completion decision for this turn. Never raises."""
+    fallback = {"useful": False, "off_topic": False, "extracted": {},
+                "status": "INCOMPLETE", "missing": []}
+    if not goal or not user_text.strip():
+        return fallback
+    try:
+        import asyncio
+        from groq import AsyncGroq
+        payload = {
+            "node": node_name,
+            "goal": goal,
+            "already_captured": {k: str(v)[:60] for k, v in (extracted or {}).items()},
+            "mira_last_said": str(mira_last)[:200],
+            "user_said": user_text,
+        }
+        allowed = "\n".join(f"  {p}" for p in paths) or "  (none — this node captures nothing)"
+        client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+        resp = await asyncio.wait_for(
+            client.chat.completions.create(
+                model=_CHECK_MODEL,
+                messages=[
+                    {"role": "system",
+                     "content": _CHECK_SYSTEM + "\n\nALLOWED PATHS\n" + allowed},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=0.1,
+                response_format={"type": "json_object"},
+                reasoning_effort=os.getenv("P2_CHECK_EFFORT", "low"),
+            ),
+            timeout=_CHECK_TIMEOUT,
+        )
+        data = json.loads(resp.choices[0].message.content or "{}")
+    except Exception:
+        return fallback
+
+    import memory_facts
+    ex = {}
+    for key, val in (data.get("extracted") or {}).items():
+        if key in memory_facts.SCHEMA and str(val).strip():
+            ex[key] = val
+    return {
+        "useful": bool(data.get("useful")),
+        "off_topic": bool(data.get("off_topic")),
+        "extracted": ex,
+        "status": "COMPLETE" if str(data.get("status", "")).upper() == "COMPLETE"
+                  else "INCOMPLETE",
+        "missing": [str(m) for m in (data.get("missing") or [])][:3],
+    }
+
+
+def node_is_covered(node_name, extracted):
+    """Deterministic floor: has this node's own path quota been met?
+
+    Belt and braces alongside the model's judgement — if the paths are filled,
+    the node is done regardless of what the model thinks.
+    """
+    spec = NODE_GOALS.get(node_name) or {}
+    paths = spec.get("paths") or []
+    if not paths:
+        return True
+    need = spec.get("min_paths", max(1, len(paths) // 2))
+    have = sum(1 for p in paths if str((extracted or {}).get(p, "")).strip())
+    return have >= need
 
 
 def check_global_trigger(text: str) -> str | None:
@@ -535,6 +694,7 @@ def create_node_processor(context, profile: dict, log_fn=None):
             self._current_node = "GREETING"
             self._turn_count = 0
             self._extracted = {}
+            self._unclear = 0
             self._call_start_turns = 0  # total turns across all nodes
             self._silence_retries = 0
             self._pending_global_response = None
@@ -601,6 +761,10 @@ def create_node_processor(context, profile: dict, log_fn=None):
 
             return None
 
+        # SUPERSEDED and no longer called. Progression is now evidence-based
+        # via check_node_complete(). Kept as documentation of the previous
+        # keyword heuristics, and as the shape of a fallback if the semantic
+        # check ever needs to be switched off.
         def _should_advance(self, user_text: str) -> bool:
             """After min_turns, decide whether to advance based on the current
             node's purpose. Uses keyword heuristics — no LLM call."""
@@ -696,13 +860,74 @@ def create_node_processor(context, profile: dict, log_fn=None):
                 # Restore prompt after this turn (next user message will rebuild).
                 return
 
-            # 3. Check for node transition (after min_turns).
+            # 3. EVIDENCE-BASED progression. One small semantic check per turn
+            #    decides what was learned; CODE decides the transition.
             node = NODES[self._current_node]
+            spec = NODE_GOALS.get(self._current_node) or {}
+            mira_last = next(
+                (m.get("content") for m in reversed(self._context.get_messages() or [])
+                 if m.get("role") == "assistant"), "")
+            decision = await check_node_complete(
+                self._current_node, spec.get("goal", ""), spec.get("paths", []),
+                self._extracted, user_text, mira_last)
+
+            # Anything the user actually stated is remembered for the REST of
+            # the call — this is what the {{extracted}} block in every node
+            # prompt has always referenced but never received.
+            if decision["extracted"]:
+                self._extracted.update(decision["extracted"])
+                self._log(f"extracted {list(decision['extracted'])} "
+                          f"(total {len(self._extracted)})")
+
+            hint = ""
+            if decision["off_topic"]:
+                # QUICK-style escape: answer it, then come back. The turn does
+                # not count against the node and no state is lost.
+                self._turn_count -= 1
+                hint = ("\n\nThe user just asked their own unrelated question. "
+                        "Answer it briefly and warmly in one line, then return to "
+                        "what you were asking. Do not restart or lose your place.\n")
+                self._log(f"off-topic aside node={self._current_node} (turn not counted)")
+            elif not decision["useful"]:
+                # "हम्म", silence, garbled speech. Don't count it, and don't
+                # repeat the same sentence back at them mechanically.
+                self._turn_count -= 1
+                self._unclear += 1
+                if self._unclear >= 2:
+                    hint = ("\n\nThey still have not answered. Do NOT repeat your "
+                            "question again — acknowledge lightly, make it much "
+                            "easier by offering a simple either/or, and move on if "
+                            "they still cannot answer.\n")
+                else:
+                    hint = ("\n\nThat did not answer your question — the audio may "
+                            "have been unclear. Ask ONCE more, in DIFFERENT and "
+                            "simpler words. Never repeat your previous sentence "
+                            "verbatim.\n")
+                self._log(f"unusable turn #{self._unclear} node={self._current_node}")
+            else:
+                self._unclear = 0
+                if decision["missing"]:
+                    hint = ("\n\nStill needed before you move on: "
+                            + "; ".join(decision["missing"])
+                            + ". Ask about the single most useful one, in ONE question.\n")
+
+            # Deterministic transition. max_turns stays a hard safety limit.
+            covered = node_is_covered(self._current_node, self._extracted)
+            complete = decision["status"] == "COMPLETE" or covered
             if self._turn_count >= node["max_turns"]:
-                self._advance("max_turns reached")
-            elif self._turn_count >= node["min_turns"]:
-                if self._should_advance(user_text):
-                    self._advance("transition condition met")
+                self._advance(f"max_turns reached (incomplete, "
+                              f"{len(self._extracted)} facts)")
+            elif complete and self._turn_count >= node["min_turns"]:
+                self._advance(f"goal covered ({decision['status']}, "
+                              f"covered={covered})")
+            elif hint:
+                msgs = self._context.get_messages()
+                if msgs:
+                    base = build_node_prompt(self._current_node, self._profile,
+                                             self._extracted)
+                    msgs[0] = {"role": "system",
+                               "content": base + hint + "\n" + GLOBAL_RULES}
+                    self._context.set_messages(msgs)
 
             # 4. Pass frame through to LLM.
             await self.push_frame(frame, direction)
