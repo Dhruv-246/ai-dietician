@@ -93,7 +93,7 @@ IF THEY ASK "kitna time lagega?":
 
 USER PROFILE (you already have this — NEVER ask for any of it):
 {{profile}}""",
-        "min_turns": 2,
+        "min_turns": 1,
         "max_turns": 4,
         "next": "RAPPORT",
         "exit_on": {
@@ -218,7 +218,7 @@ WHAT YOU KNOW SO FAR:
 
 USER PROFILE:
 {{profile}}""",
-        "min_turns": 4,
+        "min_turns": 1,
         "max_turns": 8,
         "next": "LIFESTYLE",
     },
@@ -256,7 +256,7 @@ WHAT YOU KNOW SO FAR:
 
 USER PROFILE:
 {{profile}}""",
-        "min_turns": 2,
+        "min_turns": 1,
         "max_turns": 5,
         "next": "SUPPORT_PREF",
     },
@@ -365,6 +365,16 @@ EXIT_NODES = {
 #
 # `paths` are existing SCHEMA paths only — no new fields are invented, so
 # whatever onboarding learns is already in P-3's vocabulary.
+# min_turns is NO LONGER the progression gate — coverage and the semantic
+# check are. It now means only "this node is worth at least N exchanges even
+# once its information is captured", so it survives where the node's value is
+# the CONVERSATION rather than the data:
+#   RAPPORT (2)  warmth; rushing it makes the call transactional
+#   PROBLEM (3)  depth; the node prompt itself says "go slow, 3-5 exchanges"
+#   CLOSE   (2)  a natural wind-down
+# It was dropped to 1 where it was only padding a data-collection node:
+#   GREETING, DAILY_EATING, LIFESTYLE — a user who describes their whole day
+#   in one sentence should not then be asked three more times.
 NODE_GOALS = {
     "GREETING": {
         "goal": "Just make them comfortable and confirm they can talk now.",
