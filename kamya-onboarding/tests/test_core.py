@@ -220,6 +220,29 @@ def test_onboarding():
        {"DEFLECT", "WHAT_NEXT"} <= names)
 
 
+# ------------------------------------------------------------ reply shape --
+def test_prompt_invariants():
+    """Rules earned from real calls. Each one cost a live call to find."""
+    g = on.GLOBAL_RULES
+    ck("the ack rotation list is gone",
+       'rotate "अच्छा"' not in g)
+    ck("restating the user's answer is banned",
+       "DO NOT REPEAT THEIR ANSWER BACK" in g)
+    ck("confirm-what-you-just-heard questions are banned",
+       "NEVER ask them to confirm something they just told you" in g)
+    ck("vague questions are called out with a concrete fix",
+       "ASK ABOUT THE THING, NOT AROUND IT" in g)
+    ck("one question per reply still enforced in prose", "ONE question per reply" in g)
+    ck("समझी opener still banned", "समझी" in g and "NEVER open a reply" in g)
+
+    # The vague opener was a hardcoded string in the node prompt, so no amount
+    # of rule-writing elsewhere could override it.
+    daily = on.NODES["DAILY_EATING"]["prompt"]
+    ck("DAILY_EATING opener asks about FOOD, not the morning in general",
+       "सबसे पहले क्या खाते हैं" in daily
+       and "सबसे पहले क्या होता है" not in daily)
+
+
 # ---------------------------------------------------------------- fallback --
 def test_bedrock_falls_back():
     """A Bedrock outage must cost a slower turn, not a lost decision."""
@@ -263,7 +286,8 @@ def test_bedrock_falls_back():
 
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
-               test_rag_gate, test_onboarding, test_bedrock_falls_back):
+               test_rag_gate, test_onboarding, test_prompt_invariants,
+               test_bedrock_falls_back):
         fn()
     passed = sum(1 for _, c, _ in R if c)
     print("=" * 74)

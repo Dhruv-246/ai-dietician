@@ -505,8 +505,12 @@ class _DiagObserver(BaseObserver):
             return
         if isinstance(frame, TranscriptionFrame) and getattr(self, "_spoke_end", None):
             gap = (time.perf_counter() - self._spoke_end) * 1000
+            # Report the value we actually SENT to Flux. This used to print
+            # the raw env var, so an unset var logged "default 5000" while the
+            # code was in fact sending 2000 -- the log contradicted the
+            # configuration and sent us hunting a timeout that was not there.
             _log(f"STT end-of-turn gap {gap:.0f}ms "
-                 f"(eot_timeout_ms={os.getenv('DEEPGRAM_EOT_TIMEOUT_MS', 'default 5000')})")
+                 f"(eot_timeout_ms={os.getenv('DEEPGRAM_EOT_TIMEOUT_MS', '2000')})")
             self._spoke_end = None
             return
 
@@ -874,10 +878,14 @@ class ReplyShapeFilter(FrameProcessor):
 
     _SENT_END = ("।", ".", "?", "!")
 
-    def __init__(self, label="", word_cap=40):
+    def __init__(self, label="", word_cap=40, restore_question_mark=False):
         super().__init__()
         self._label = label
         self._cap = word_cap
+        # Only true when the LLM runs with stop=["?"], which eats the mark.
+        # Appending one unconditionally would put a "?" on the CLOSE node's
+        # farewell, which is a statement and must stay one.
+        self._restore_q = restore_question_mark
         self._cut = False
         self._dropped = 0
         self._words = 0
@@ -897,7 +905,7 @@ class ReplyShapeFilter(FrameProcessor):
                 # first question mark AND strips it. Put it back so TTS speaks
                 # the sentence with question intonation rather than flatly.
                 # Pushed BEFORE the End frame so it joins the pending sentence.
-                if self._sent and not self._sent_end_punct:
+                if self._restore_q and self._sent and not self._sent_end_punct:
                     await self.push_frame(LLMTextFrame("?"), direction)
                 # Log whenever the filter BOUND the reply, even if zero chars
                 # were dropped — a cut that lands exactly on the last sentence
@@ -1236,9 +1244,25 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # the thread machine's per-stage word budgets, which the model follows.
         _max_tok = int(os.getenv("LLM_MAX_TOKENS", "400"))
         _effort = (os.getenv("LLM_REASONING_EFFORT", "low") or "").strip()
-        # Stop generating at the first question mark. ReplyShapeFilter puts the
-        # stripped "?" back before TTS. See that class for why this exists.
-        _stops = ["?", "？"] if os.getenv("LLM_STOP_AT_QUESTION", "1") != "0" else []
+        # OFF BY DEFAULT, because it cost ~4s on every single turn.
+        #
+        # Stopping at "?" also STRIPS it, and a Mira reply is usually one
+        # question -- so the text handed to TTS ended with no terminal
+        # punctuation at all. Pipecat's TTS aggregates by sentence, so it had
+        # nothing to flush and sat waiting until generation finished and
+        # ReplyShapeFilter appended the "?" at LLMFullResponseEndFrame. That
+        # serialised what should have been streaming: measured 2026-08-28,
+        # `llm responding` -> `tts started` was 4s on EVERY turn, suspiciously
+        # constant, because it was not generation time -- it was waiting.
+        #
+        # The same End-frame append also put the "?" one reply late in the
+        # captions, so every line of the transcript began with a stray "?".
+        #
+        # None of this bought anything: ReplyShapeFilter already truncates at
+        # the first "?" IN STREAM. Letting the model emit the "?" itself keeps
+        # the one-question guarantee, lets TTS start on the first sentence, and
+        # puts the "?" where it belongs.
+        _stops = ["?", "？"] if os.getenv("LLM_STOP_AT_QUESTION", "0") != "0" else []
 
         if llm_client.provider() == "bedrock" and AWSBedrockLLMService is not None:
             # Claude on Bedrock: no reasoning tokens before the first spoken
@@ -1442,7 +1466,11 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     stages.append(ReplyShapeFilter(
         " (onboarding)" if mode == "onboarding" else "",
         word_cap=int(os.getenv("P2_WORD_CAP", "32")) if mode == "onboarding"
-        else int(os.getenv("P3_WORD_CAP", "60"))))
+        else int(os.getenv("P3_WORD_CAP", "60")),
+        # Read the env var rather than the _stops local: that local is only
+        # bound inside the groq/bedrock branch, so referencing it here would
+        # NameError on any other engine.
+        restore_question_mark=os.getenv("LLM_STOP_AT_QUESTION", "0") != "0"))
     stages += [
         tts,                          # text -> speech
         transport.output(),           # speaker out (to LiveKit)
