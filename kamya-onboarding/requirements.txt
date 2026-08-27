@@ -1,6 +1,6 @@
 # Kamya Wellness onboarding voice agent (Pipecat + LiveKit). Python 3.10+ (tested on 3.11).
 # Pinned to the version the bot was written/validated against.
-pipecat-ai[sarvam,groq,silero,livekit,google,cartesia]==1.7.0
+pipecat-ai[sarvam,groq,silero,livekit,google,cartesia,aws]==1.7.0
 
 # LiveKit browser-token minting + rtc client used by the transport.
 livekit
@@ -18,5 +18,9 @@ google-auth>=2.0.0
 # thread. Runs inside ONE Pipecat processor; it never owns the turn
 # lifecycle or the generation call.
 langgraph
+
+# AWS Bedrock: the router / node-check / consolidation calls go through
+# boto3's Converse API directly (see llm_client.py).
+boto3
 
 python-dotenv

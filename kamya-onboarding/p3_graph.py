@@ -30,6 +30,7 @@ from typing_extensions import TypedDict
 
 from langgraph.graph import END, StateGraph
 
+import llm_client
 import memory_facts
 import rag
 import rag_query
@@ -278,8 +279,12 @@ def _node_safety(state: ConvState) -> ConvState:
 
 
 async def _call_router(text, threads, history):
-    """The single model call. Small model, JSON out, hard timeout."""
-    from groq import AsyncGroq
+    """The single model call. Small model, JSON out, hard timeout.
+
+    Provider-agnostic via llm_client: Bedrock when AWS credentials are present,
+    Groq otherwise. Bedrock has no response_format, so llm_client prefills the
+    assistant turn with "{" to force a JSON object.
+    """
     active = next((t for t in threads if not t.parked), None)
     parked = [t.topic for t in threads if t.parked]
 
@@ -305,23 +310,10 @@ async def _call_router(text, threads, history):
         "user_said": text,
         "recent_turns": history[-4:],
     }
-    client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
-    # gpt-oss-20b is ALSO a reasoning model. Left at default effort it spends
-    # most of its latency thinking about a classification that needs no
-    # thought, and at a 5s ceiling well over half of turns timed out — each
-    # one silently losing a SWITCH or RESUME. reasoning_effort=low is the same
-    # fix that unblocked the compose model.
-    resp = await client.chat.completions.create(
-        model=_ROUTER_MODEL,
-        messages=[
-            {"role": "system", "content": _ROUTER_SYSTEM},
-            {"role": "user", "content": json.dumps(ctx, ensure_ascii=False)},
-        ],
-        temperature=0.1,
-        response_format={"type": "json_object"},
-        reasoning_effort=os.getenv("P3_ROUTER_EFFORT", "low"),
-    )
-    return json.loads(resp.choices[0].message.content or "{}")
+    return await llm_client.complete_json(
+        _ROUTER_SYSTEM, json.dumps(ctx, ensure_ascii=False),
+        kind="fast", max_tokens=600, temperature=0.1,
+        timeout=_ROUTER_TIMEOUT, groq_model=_ROUTER_MODEL)
 
 
 async def _node_sense(state: ConvState) -> ConvState:

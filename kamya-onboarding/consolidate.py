@@ -23,8 +23,7 @@ conversation model's token budget.
 import json
 import os
 
-from groq import Groq
-
+import llm_client
 import memory_facts
 
 # llama-3.1-8b-instant was decommissioned 2026-08-16, and its drop-in
@@ -135,8 +134,8 @@ def _validate_patch(data) -> dict:
     }
 
 
-def consolidate_patch(current_view: dict, existing_open_loops: list,
-                      transcript: str, attempts: int = 3) -> dict:
+async def consolidate_patch(current_view: dict, existing_open_loops: list,
+                            transcript: str, attempts: int = 3) -> dict:
     """Ask the model for a PATCH. Returns {ops, session_summary, open_loops}.
 
     Retries with the rejection reason fed back, because the observed failures
@@ -144,7 +143,6 @@ def consolidate_patch(current_view: dict, existing_open_loops: list,
     ConsolidationError once attempts are exhausted — the caller keeps the
     stored transcript, so the session stays replayable.
     """
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     base_msg = (
         "CURRENT MEMORY:\n"
         + json.dumps(current_view or {}, ensure_ascii=False)
@@ -163,21 +161,17 @@ def consolidate_patch(current_view: dict, existing_open_loops: list,
                 "Return ONLY valid JSON matching the schema exactly."
             )
         try:
-            resp = client.chat.completions.create(
-                model=_MODEL,
-                messages=[
-                    {"role": "system", "content": _SYSTEM},
-                    {"role": "user", "content": user_msg},
-                ],
-                # Nudge off a deterministic bad path on retries.
-                temperature=0.2 if attempt == 1 else 0.4,
-                response_format={"type": "json_object"},
-            )
-            content = (resp.choices[0].message.content or "").strip()
-            if not content:
-                raise ConsolidationError("model returned an empty response")
-            return _validate_patch(json.loads(content))
-        except Exception as exc:  # API errors, JSON errors, validation errors
+            # Runs after hangup, so a generous timeout costs nothing and the
+            # heavier model is worth it — this is the one job where schema
+            # adherence matters more than speed.
+            data = await llm_client.complete_json(
+                _SYSTEM, user_msg, kind="heavy", max_tokens=3000,
+                temperature=0.2 if attempt == 1 else 0.4, timeout=60.0,
+                groq_model=_MODEL)
+            if not data:
+                raise ConsolidationError("model returned nothing usable")
+            return _validate_patch(data)
+        except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"[:400]
             print(f"[consolidate] attempt {attempt}/{attempts} failed: {last_error}",
                   flush=True)

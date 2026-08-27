@@ -83,6 +83,7 @@ try:
     from pipecat.services.google.llm import GoogleLLMService
     from pipecat.services.deepseek.llm import DeepSeekLLMService
     from pipecat.services.groq.llm import GroqLLMService
+    from pipecat.services.aws.llm import AWSBedrockLLMService
     from pipecat.transcriptions.language import Language
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.runner.livekit import generate_token, generate_token_with_agent
@@ -97,6 +98,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 import consolidate
+import llm_client
 import memory_facts
 import memory_store
 import onboarding_nodes
@@ -1226,27 +1228,44 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # the thread machine's per-stage word budgets, which the model follows.
         _max_tok = int(os.getenv("LLM_MAX_TOKENS", "400"))
         _effort = (os.getenv("LLM_REASONING_EFFORT", "low") or "").strip()
-        _extra = {"reasoning_effort": _effort} if _effort else {}
-        # STOP GENERATING AT THE FIRST QUESTION MARK.
-        # ReplyShapeFilter stops extra questions REACHING TTS, but the model was
-        # still writing them: live log shows "dropped 644 chars" and turns where
-        # generation alone took 18-23s. Everything past the first "?" was paid
-        # for in latency and tokens and then discarded — and it still reached
-        # the on-screen captions, which observe frames before the filter.
-        # A stop sequence removes the work instead of hiding it.
-        # Groq strips the stop string itself, so ReplyShapeFilter puts the "?"
-        # back before TTS (see _restore_question_mark there) — without it the
-        # sentence would be spoken with flat, statement-like intonation.
-        if os.getenv("LLM_STOP_AT_QUESTION", "1") != "0":
-            _extra["stop"] = ["?", "？"]
-        _log(f"llm=groq model={groq_model} max_tokens={_max_tok} "
-             f"reasoning_effort={_effort or 'default'} room={room_name}")
-        llm = GroqLLMService(
-            api_key=os.getenv("GROQ_API_KEY"),
-            settings=GroqLLMService.Settings(model=groq_model,
-                                             max_tokens=_max_tok,
-                                             extra=_extra),
-        )
+        # Stop generating at the first question mark. ReplyShapeFilter puts the
+        # stripped "?" back before TTS. See that class for why this exists.
+        _stops = ["?", "？"] if os.getenv("LLM_STOP_AT_QUESTION", "1") != "0" else []
+
+        if llm_client.provider() == "bedrock":
+            # Claude on Bedrock: no reasoning tokens before the first spoken
+            # word, and the best instruction-following available at
+            # conversational speed — which matters because almost all of
+            # Mira's behaviour lives in prompt rules.
+            _model = llm_client.bedrock_model("chat")
+            _log(f"llm=bedrock model={_model} region={llm_client._region()} "
+                 f"max_tokens={_max_tok} room={room_name}")
+            llm = AWSBedrockLLMService(
+                model=_model,
+                aws_access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+                aws_secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                aws_session_token=os.getenv("AWS_SESSION_TOKEN") or None,
+                aws_region=llm_client._region(),
+                settings=AWSBedrockLLMService.Settings(
+                    model=_model,
+                    max_tokens=_max_tok,
+                    temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
+                    stop_sequences=_stops,
+                ),
+            )
+        else:
+            groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+            _extra = {"reasoning_effort": _effort} if _effort else {}
+            if _stops:
+                _extra["stop"] = _stops
+            _log(f"llm=groq model={groq_model} max_tokens={_max_tok} "
+                 f"reasoning_effort={_effort or 'default'} room={room_name}")
+            llm = GroqLLMService(
+                api_key=os.getenv("GROQ_API_KEY"),
+                settings=GroqLLMService.Settings(model=groq_model,
+                                                 max_tokens=_max_tok,
+                                                 extra=_extra),
+            )
 
     # TTS engine selection. TTS_ENGINE env:
     #  - "cartesia" (DEFAULT): Cartesia Sonic 3.5 — Hindi + native Hinglish voice,
@@ -1500,7 +1519,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
                 current_view = memory_facts.build_current_view(facts)
 
                 # The model proposes; the code decides.
-                patch = consolidate.consolidate_patch(
+                patch = await consolidate.consolidate_patch(
                     current_view, existing_open_loops or [], transcript)
                 new_rows, invalidations, audit = memory_facts.apply_patch(
                     facts, patch["ops"], run_id, transcript, when=ended_at,
@@ -1674,11 +1693,13 @@ def _reprocess_sync(session_id=None, limit=10):
                 memory_store.append_facts(seed_rows)
                 facts = seed_rows
 
-            patch = consolidate.consolidate_patch(
+            # _reprocess_sync is blocking (run via asyncio.to_thread), so the
+            # now-async consolidate_patch needs its own loop here.
+            patch = asyncio.run(consolidate.consolidate_patch(
                 memory_facts.build_current_view(facts),
                 mem.get("open_loops") or [],
                 r["transcript"],
-            )
+            ))
             new_rows, invalidations, audit = memory_facts.apply_patch(
                 facts, patch["ops"], sid, r["transcript"], when=when,
                 firebase_uid=uid, user_id=r["user_id"])

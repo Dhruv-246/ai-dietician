@@ -587,8 +587,7 @@ async def check_node_complete(node_name, goal, paths, extracted, user_text, mira
     if not goal or not user_text.strip():
         return fallback
     try:
-        import asyncio
-        from groq import AsyncGroq
+        import llm_client
         payload = {
             "node": node_name,
             "goal": goal,
@@ -597,22 +596,13 @@ async def check_node_complete(node_name, goal, paths, extracted, user_text, mira
             "user_said": user_text,
         }
         allowed = "\n".join(f"  {p}" for p in paths) or "  (none — this node captures nothing)"
-        client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
-        resp = await asyncio.wait_for(
-            client.chat.completions.create(
-                model=_CHECK_MODEL,
-                messages=[
-                    {"role": "system",
-                     "content": _CHECK_SYSTEM + "\n\nALLOWED PATHS\n" + allowed},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-                temperature=0.1,
-                response_format={"type": "json_object"},
-                reasoning_effort=os.getenv("P2_CHECK_EFFORT", "low"),
-            ),
-            timeout=_CHECK_TIMEOUT,
-        )
-        data = json.loads(resp.choices[0].message.content or "{}")
+        data = await llm_client.complete_json(
+            _CHECK_SYSTEM + "\n\nALLOWED PATHS\n" + allowed,
+            json.dumps(payload, ensure_ascii=False),
+            kind="fast", max_tokens=500, temperature=0.1,
+            timeout=_CHECK_TIMEOUT, groq_model=_CHECK_MODEL)
+        if not data:
+            return fallback
     except Exception:
         return fallback
 
