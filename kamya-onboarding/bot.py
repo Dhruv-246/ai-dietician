@@ -855,6 +855,8 @@ class ReplyShapeFilter(FrameProcessor):
         self._dropped = 0
         self._words = 0
         self._reason = ""
+        self._sent = False              # did we emit any text this response?
+        self._sent_end_punct = False    # did it already end in punctuation?
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
@@ -862,7 +864,14 @@ class ReplyShapeFilter(FrameProcessor):
             if isinstance(frame, LLMFullResponseStartFrame):
                 self._cut, self._dropped, self._words = False, 0, 0
                 self._reason = ""
+                self._sent, self._sent_end_punct = False, False
             elif isinstance(frame, LLMFullResponseEndFrame):
+                # The model is run with stop=["?"], which ends generation at the
+                # first question mark AND strips it. Put it back so TTS speaks
+                # the sentence with question intonation rather than flatly.
+                # Pushed BEFORE the End frame so it joins the pending sentence.
+                if self._sent and not self._sent_end_punct:
+                    await self.push_frame(LLMTextFrame("?"), direction)
                 # Log whenever the filter BOUND the reply, even if zero chars
                 # were dropped — a cut that lands exactly on the last sentence
                 # still means the cap was doing the work, and that rate is
@@ -886,11 +895,15 @@ class ReplyShapeFilter(FrameProcessor):
                     self._cut, self._reason = True, "second question"
                     self._words += len(keep.split())
                     if keep:
+                        self._sent, self._sent_end_punct = True, True
                         await self.push_frame(LLMTextFrame(keep), direction)
                     return
 
                 # 2. length — finish the sentence in progress, then stop
                 self._words += len(text.split())
+                if text.strip():
+                    self._sent = True
+                    self._sent_end_punct = text.rstrip()[-1] in self._SENT_END
                 if self._words > self._cap:
                     idx = max(text.rfind(c) for c in self._SENT_END)
                     if idx >= 0:
@@ -1191,6 +1204,18 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         _max_tok = int(os.getenv("LLM_MAX_TOKENS", "400"))
         _effort = (os.getenv("LLM_REASONING_EFFORT", "low") or "").strip()
         _extra = {"reasoning_effort": _effort} if _effort else {}
+        # STOP GENERATING AT THE FIRST QUESTION MARK.
+        # ReplyShapeFilter stops extra questions REACHING TTS, but the model was
+        # still writing them: live log shows "dropped 644 chars" and turns where
+        # generation alone took 18-23s. Everything past the first "?" was paid
+        # for in latency and tokens and then discarded — and it still reached
+        # the on-screen captions, which observe frames before the filter.
+        # A stop sequence removes the work instead of hiding it.
+        # Groq strips the stop string itself, so ReplyShapeFilter puts the "?"
+        # back before TTS (see _restore_question_mark there) — without it the
+        # sentence would be spoken with flat, statement-like intonation.
+        if os.getenv("LLM_STOP_AT_QUESTION", "1") != "0":
+            _extra["stop"] = ["?", "？"]
         _log(f"llm=groq model={groq_model} max_tokens={_max_tok} "
              f"reasoning_effort={_effort or 'default'} room={room_name}")
         llm = GroqLLMService(
