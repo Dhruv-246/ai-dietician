@@ -813,55 +813,98 @@ class ThreadMachineProcessor(FrameProcessor):
                 if t.stage != thread_machine.S_CLOSE]
 
 
-class OneQuestionFilter(FrameProcessor):
-    """Cut every reply at the end of its FIRST question. ENFORCES, not logs.
+class ReplyShapeFilter(FrameProcessor):
+    """Physically bound what Mira says: ONE question, and one or two lines.
 
-    Live onboarding call produced this, as ONE utterance:
+    Two separate failures, one mechanism, because both were asked for in prose
+    and ignored.
 
-      "...आप weight loss से क्या achieve करना चाहते हैं?थोड़ा और बताइए?अभी sign up
-       करने का मन कैसे किया?...पहले कभी कुछ try किया था?...कहाँ अटक रहा है?"
+    QUESTION STACKING. A live onboarding call produced this as ONE utterance:
 
-    and eleven questions in a row at DAILY_EATING. Those are verbatim the
-    example questions from the node prompt — the model read the node's
-    checklist as a script and recited it.
+      "...आप weight loss से क्या achieve करना चाहते हैं?थोड़ा और बताइए?अभी sign
+       up करने का मन कैसे किया?...पहले कभी कुछ try किया था?...कहाँ अटक रहा है?"
 
-    Every prompt involved already said "ONE question at a time". Asking again
-    is not a fix. This drops any streamed token after the first question mark,
-    so a stacked reply is physically truncated to its first question.
+    and eleven questions in a row at DAILY_EATING — verbatim the example
+    questions from the node prompts, recited as a script. The DAILY_EATING
+    prompt already said "Ask ONE meal at a time" AND "Never read these as a
+    list", and GLOBAL_RULES already said "ONE question at a time". Three
+    instructions, all ignored.
 
-    Streaming-safe: frames pass straight through until the cut, so nothing is
-    buffered and no latency is added. The audio the user hears simply stops at
-    the first "?" — which is the whole intent.
+    LENGTH. Also prose only: GLOBAL_RULES said "1-2 short sentences, ~25 words
+    max", the P-3 stage budgets said "keep it under N words", and
+    ResponseValidator logged "too long" without ever withholding anything. The
+    same call still produced questions running several lines.
+
+    So both are enforced here instead. Everything after the first question
+    mark is dropped, and length is cut at a SENTENCE BOUNDARY past the cap —
+    never mid-word, because a reply chopped inside a word sounds broken, which
+    is worse than a slightly long one. A hard stop at twice the cap catches a
+    model that never punctuates at all.
+
+    Streaming-safe: frames pass straight through until a cut, so nothing is
+    buffered and no latency is added.
     """
 
-    def __init__(self, label=""):
+    _SENT_END = ("।", ".", "?", "!")
+
+    def __init__(self, label="", word_cap=40):
         super().__init__()
         self._label = label
+        self._cap = word_cap
         self._cut = False
         self._dropped = 0
+        self._words = 0
+        self._reason = ""
 
     async def process_frame(self, frame, direction):
         await super().process_frame(frame, direction)
         if direction == FrameDirection.DOWNSTREAM:
             if isinstance(frame, LLMFullResponseStartFrame):
-                self._cut, self._dropped = False, 0
+                self._cut, self._dropped, self._words = False, 0, 0
+                self._reason = ""
             elif isinstance(frame, LLMFullResponseEndFrame):
-                if self._dropped:
-                    _log(f"  one-question filter{self._label}: dropped "
-                         f"{self._dropped} chars after the first question")
-                self._cut, self._dropped = False, 0
+                # Log whenever the filter BOUND the reply, even if zero chars
+                # were dropped — a cut that lands exactly on the last sentence
+                # still means the cap was doing the work, and that rate is
+                # what tells you whether the prompts are pulling their weight.
+                if self._cut:
+                    _log(f"  shape filter{self._label}: cut on {self._reason}, "
+                         f"dropped {self._dropped} chars "
+                         f"({self._words} words kept, cap {self._cap})")
+                self._cut, self._dropped, self._words = False, 0, 0
+                self._reason = ""
             elif isinstance(frame, LLMTextFrame):
                 text = getattr(frame, "text", "") or ""
                 if self._cut:
                     self._dropped += len(text)
-                    return                      # suppress — already answered
+                    return                      # suppress the rest of the reply
+
+                # 1. one question only
                 if "?" in text:
                     keep = text[: text.index("?") + 1]
                     self._dropped += len(text) - len(keep)
-                    self._cut = True
+                    self._cut, self._reason = True, "second question"
+                    self._words += len(keep.split())
                     if keep:
                         await self.push_frame(LLMTextFrame(keep), direction)
                     return
+
+                # 2. length — finish the sentence in progress, then stop
+                self._words += len(text.split())
+                if self._words > self._cap:
+                    idx = max(text.rfind(c) for c in self._SENT_END)
+                    if idx >= 0:
+                        keep = text[: idx + 1]
+                        self._dropped += len(text) - len(keep)
+                        self._cut, self._reason = True, f"length>{self._cap}w"
+                        if keep:
+                            await self.push_frame(LLMTextFrame(keep), direction)
+                        return
+                    if self._words > self._cap * 2:
+                        # never punctuated — stop rather than run on forever
+                        self._dropped += len(text)
+                        self._cut, self._reason = True, "unpunctuated runaway"
+                        return
         await self.push_frame(frame, direction)
 
 
@@ -1315,8 +1358,13 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         stages.append(ResponseValidator(thread_proc))
     # Both products stack questions when the prompt lists examples. Enforced
     # here rather than requested in prose, because the prose already failed.
-    stages.append(OneQuestionFilter(
-        " (onboarding)" if mode == "onboarding" else ""))
+    # Caps are per product: onboarding asks for ~25 words, P-3's largest stage
+    # budget (ADVISE) is 45. Both are set above the request so the filter only
+    # catches genuine runaway, not ordinary variation.
+    stages.append(ReplyShapeFilter(
+        " (onboarding)" if mode == "onboarding" else "",
+        word_cap=int(os.getenv("P2_WORD_CAP", "32")) if mode == "onboarding"
+        else int(os.getenv("P3_WORD_CAP", "60"))))
     stages += [
         tts,                          # text -> speech
         transport.output(),           # speaker out (to LiveKit)
