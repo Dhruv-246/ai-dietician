@@ -1644,7 +1644,26 @@ async def avatar():
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True}
+    """Liveness, plus WHICH BUILD is answering.
+
+    Railway injects RAILWAY_GIT_COMMIT_SHA at build time. Without it there is
+    no way to tell a finished deploy from a still-running old one -- the
+    endpoint returns an identical {"ok": true} either way, so a push that
+    never landed looks exactly like a push that did.
+
+    `llm` reports the provider this process actually resolved, which is not
+    always the one the env vars imply: a bearer token that is not picked up,
+    or a missing pipecat aws extra, both silently leave it on groq.
+    """
+    sha = (os.getenv("RAILWAY_GIT_COMMIT_SHA")
+           or os.getenv("GIT_COMMIT_SHA") or "")
+    return {
+        "ok": True,
+        "commit": sha[:7] or "unknown",
+        "llm": llm_client.provider(),
+        "bedrock_model": llm_client.bedrock_model("chat") or None,
+        "aws_extra": AWSBedrockLLMService is not None,
+    }
 
 
 @app.get("/events")
