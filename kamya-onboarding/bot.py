@@ -58,6 +58,7 @@ try:
         TTSStartedFrame,
         TTSAudioRawFrame,
         UserStartedSpeakingFrame,
+        UserStoppedSpeakingFrame,
         BotStoppedSpeakingFrame,
     )
     from pipecat.observers.base_observer import BaseObserver, FramePushed
@@ -483,6 +484,22 @@ class _DiagObserver(BaseObserver):
             if self._audio == 1:
                 _log(f"tts audio flowing (sr={getattr(frame,'sample_rate','?')})")
             return
+        # THE GAP NOBODY WAS MEASURING. Every latency number so far started at
+        # "caption sent role=user" — i.e. AFTER Deepgram decided the user had
+        # finished. Flux's eot_timeout_ms defaults to 5000ms, so an utterance it
+        # is not confident about sits silent for up to five seconds before a
+        # transcript exists at all. That is invisible in the pipeline log and
+        # is felt by the user as Mira being slow.
+        if isinstance(frame, UserStoppedSpeakingFrame):
+            self._spoke_end = time.perf_counter()
+            return
+        if isinstance(frame, TranscriptionFrame) and getattr(self, "_spoke_end", None):
+            gap = (time.perf_counter() - self._spoke_end) * 1000
+            _log(f"STT end-of-turn gap {gap:.0f}ms "
+                 f"(eot_timeout_ms={os.getenv('DEEPGRAM_EOT_TIMEOUT_MS', 'default 5000')})")
+            self._spoke_end = None
+            return
+
         for cls, label in (
             (LLMFullResponseStartFrame, "llm responding"),
             (TTSStartedFrame, "tts started"),
@@ -1142,8 +1159,14 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
             flux_kwargs["min_confidence"] = float(os.getenv("DEEPGRAM_MIN_CONFIDENCE"))
         if os.getenv("DEEPGRAM_EOT_THRESHOLD"):
             flux_kwargs["eot_threshold"] = float(os.getenv("DEEPGRAM_EOT_THRESHOLD"))
-        if os.getenv("DEEPGRAM_EOT_TIMEOUT_MS"):
-            flux_kwargs["eot_timeout_ms"] = int(os.getenv("DEEPGRAM_EOT_TIMEOUT_MS"))
+        # Deepgram's own default is 5000ms — five seconds of silence after the
+        # user stops, whenever Flux is not confident the turn ended. On a call
+        # that reads as Mira being broken. 2000ms still leaves room for the
+        # mid-sentence pauses Hindi speakers actually make, and only affects
+        # the UNCERTAIN case: a confident end-of-turn still fires immediately
+        # via eot_threshold, which is deliberately left at its default so we
+        # do not start cutting people off.
+        flux_kwargs["eot_timeout_ms"] = int(os.getenv("DEEPGRAM_EOT_TIMEOUT_MS", "2000"))
         if os.getenv("DEEPGRAM_EAGER_EOT"):
             flux_kwargs["eager_eot_threshold"] = float(os.getenv("DEEPGRAM_EAGER_EOT"))
         stt = DeepgramFluxSTTService(
