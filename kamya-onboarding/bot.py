@@ -813,6 +813,58 @@ class ThreadMachineProcessor(FrameProcessor):
                 if t.stage != thread_machine.S_CLOSE]
 
 
+class OneQuestionFilter(FrameProcessor):
+    """Cut every reply at the end of its FIRST question. ENFORCES, not logs.
+
+    Live onboarding call produced this, as ONE utterance:
+
+      "...आप weight loss से क्या achieve करना चाहते हैं?थोड़ा और बताइए?अभी sign up
+       करने का मन कैसे किया?...पहले कभी कुछ try किया था?...कहाँ अटक रहा है?"
+
+    and eleven questions in a row at DAILY_EATING. Those are verbatim the
+    example questions from the node prompt — the model read the node's
+    checklist as a script and recited it.
+
+    Every prompt involved already said "ONE question at a time". Asking again
+    is not a fix. This drops any streamed token after the first question mark,
+    so a stacked reply is physically truncated to its first question.
+
+    Streaming-safe: frames pass straight through until the cut, so nothing is
+    buffered and no latency is added. The audio the user hears simply stops at
+    the first "?" — which is the whole intent.
+    """
+
+    def __init__(self, label=""):
+        super().__init__()
+        self._label = label
+        self._cut = False
+        self._dropped = 0
+
+    async def process_frame(self, frame, direction):
+        await super().process_frame(frame, direction)
+        if direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, LLMFullResponseStartFrame):
+                self._cut, self._dropped = False, 0
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                if self._dropped:
+                    _log(f"  one-question filter{self._label}: dropped "
+                         f"{self._dropped} chars after the first question")
+                self._cut, self._dropped = False, 0
+            elif isinstance(frame, LLMTextFrame):
+                text = getattr(frame, "text", "") or ""
+                if self._cut:
+                    self._dropped += len(text)
+                    return                      # suppress — already answered
+                if "?" in text:
+                    keep = text[: text.index("?") + 1]
+                    self._dropped += len(text) - len(keep)
+                    self._cut = True
+                    if keep:
+                        await self.push_frame(LLMTextFrame(keep), direction)
+                    return
+        await self.push_frame(frame, direction)
+
+
 class ResponseValidator(FrameProcessor):
     """Check what Mira actually said against the policy for that turn.
 
@@ -1261,6 +1313,10 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # Observes what Mira actually said vs the stage policy. Pass-through,
         # so it adds no latency and never withholds audio.
         stages.append(ResponseValidator(thread_proc))
+    # Both products stack questions when the prompt lists examples. Enforced
+    # here rather than requested in prose, because the prose already failed.
+    stages.append(OneQuestionFilter(
+        " (onboarding)" if mode == "onboarding" else ""))
     stages += [
         tts,                          # text -> speech
         transport.output(),           # speaker out (to LiveKit)
