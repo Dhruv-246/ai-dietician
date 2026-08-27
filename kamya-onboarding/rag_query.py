@@ -26,6 +26,7 @@ FILLER = {
     "thik", "theek", "teek", "ji", "yes", "yeah", "yep", "ya", "yup",
     "right", "sure", "sahi", "correct", "exactly", "bilkul", "bas",
     "अच्छा", "ठीक", "जी", "हाँ", "हां", "सही", "बिलकुल", "बस",
+    "हम्म", "हम्म्म", "हम", "हँ", "म्म",
     # negation-only
     "no", "nahi", "nahin", "na", "नहीं", "ना",
     # hesitation / discourse
@@ -75,6 +76,16 @@ def content_words(text):
     return [t for t in _tokens(text) if t not in _STOP]
 
 
+# Devanagari hums get written every which way -- हम्म, हम्म्म, हँ, म्म -- and
+# enumerating the spellings is a losing game. Any token built only from
+# ह / म / ँ / ं / ् / ा is a hum, never a question.
+_HUM_RE = re.compile(r"^[\u0939\u092e\u0901\u0902\u094d\u093e]+$")
+
+
+def _is_filler_token(tok):
+    return tok in FILLER or bool(_HUM_RE.match(tok))
+
+
 def is_retrievable(text):
     """Return (ok, reason). Cheap gate — no model call, no network.
 
@@ -87,7 +98,7 @@ def is_retrievable(text):
     toks = _tokens(raw)
     if not toks:
         return False, "no words"
-    if all(t in FILLER for t in toks):
+    if all(_is_filler_token(t) for t in toks):
         return False, "filler only"
     if not content_words(raw):
         return False, "no content words"
@@ -104,7 +115,7 @@ def needs_context(text):
 
 def _is_filler_turn(text):
     toks = _tokens(text)
-    return not toks or all(t in FILLER for t in toks)
+    return not toks or all(_is_filler_token(t) for t in toks)
 
 
 def recent_turns(messages, limit=2, scan=12):

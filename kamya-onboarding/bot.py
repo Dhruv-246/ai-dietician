@@ -83,7 +83,15 @@ try:
     from pipecat.services.google.llm import GoogleLLMService
     from pipecat.services.deepseek.llm import DeepSeekLLMService
     from pipecat.services.groq.llm import GroqLLMService
-    from pipecat.services.aws.llm import AWSBedrockLLMService
+    # Optional. The `aws` extra was added to requirements.txt after this
+    # service was deployed, so an image built before that rebuild will not
+    # have it. A hard import would then take the WHOLE bot down -- including
+    # Groq, which needs nothing from AWS. Degrade to Groq instead; the
+    # provider check below sees None and falls back.
+    try:
+        from pipecat.services.aws.llm import AWSBedrockLLMService
+    except ImportError:
+        AWSBedrockLLMService = None
     from pipecat.transcriptions.language import Language
     from pipecat.transports.livekit.transport import LiveKitParams, LiveKitTransport
     from pipecat.runner.livekit import generate_token, generate_token_with_agent
@@ -1232,7 +1240,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
         # stripped "?" back before TTS. See that class for why this exists.
         _stops = ["?", "？"] if os.getenv("LLM_STOP_AT_QUESTION", "1") != "0" else []
 
-        if llm_client.provider() == "bedrock":
+        if llm_client.provider() == "bedrock" and AWSBedrockLLMService is not None:
             # Claude on Bedrock: no reasoning tokens before the first spoken
             # word, and the best instruction-following available at
             # conversational speed — which matters because almost all of
@@ -1254,7 +1262,10 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
                 ),
             )
         else:
-            groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+            if llm_client.provider() == "bedrock":
+                _log("llm=groq WARNING bedrock requested but pipecat's aws "
+                     "extra is not installed in this image -- redeploy to pick "
+                     f"up requirements.txt room={room_name}")
             _extra = {"reasoning_effort": _effort} if _effort else {}
             if _stops:
                 _extra["stop"] = _stops

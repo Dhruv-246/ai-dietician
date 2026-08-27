@@ -17,19 +17,32 @@ PROVIDER SELECTION.
     present and groq otherwise. That means a missing/incorrect AWS setup falls
     back to the working path instead of taking the product down.
 """
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import re
 
 
+def bedrock_configured() -> bool:
+    """True if Bedrock can authenticate.
+
+    Two shapes are accepted. A Bedrock API KEY is a single bearer token in
+    AWS_BEARER_TOKEN_BEDROCK, which boto3 picks up on its own for
+    bedrock-runtime — no access key or secret involved. The older shape is the
+    usual access-key/secret pair.
+    """
+    return bool(os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+                or (os.getenv("AWS_ACCESS_KEY_ID")
+                    and os.getenv("AWS_SECRET_ACCESS_KEY")))
+
+
 def provider() -> str:
     explicit = (os.getenv("LLM_PROVIDER") or "").strip().lower()
     if explicit in ("bedrock", "groq"):
         return explicit
-    if os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"):
-        return "bedrock"
-    return "groq"
+    return "bedrock" if bedrock_configured() else "groq"
 
 
 def bedrock_model(kind: str = "chat") -> str:
@@ -79,25 +92,60 @@ def _extract_json(text: str) -> dict:
     return {}
 
 
-def _bedrock_json_sync(system, user, model, max_tokens, temperature):
-    """Blocking Bedrock Converse call that returns a dict. Runs off the loop."""
-    import boto3
-    client = boto3.client("bedrock-runtime", region_name=_region())
-    resp = client.converse(
-        modelId=model,
-        system=[{"text": system}],
-        messages=[
-            {"role": "user", "content": [{"text": user}]},
-            # Prefill: the reply can only continue an object that has already
-            # been opened, so it cannot start with prose. Bedrock's Converse
-            # API has no response_format, and this is the reliable substitute.
-            {"role": "assistant", "content": [{"text": "{"}]},
-        ],
-        inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
-    )
-    parts = resp.get("output", {}).get("message", {}).get("content", [])
-    body = "".join(p.get("text", "") for p in parts)
-    return _extract_json("{" + body)
+BEDROCK_TIMEOUT = float(os.getenv("BEDROCK_HTTP_TIMEOUT", "30"))
+
+
+def _bedrock_url(model: str, stream: bool = False) -> str:
+    verb = "invoke-with-response-stream" if stream else "invoke"
+    return (f"https://bedrock-runtime.{_region()}.amazonaws.com"
+            f"/model/{model}/{verb}")
+
+
+def bedrock_headers() -> dict:
+    """Bearer auth. A Bedrock API key is a plain token — no SigV4 signing, no
+    boto3 credential chain, which is why this uses httpx directly."""
+    return {
+        "Authorization": f"Bearer {os.getenv('AWS_BEARER_TOKEN_BEDROCK', '')}",
+        "Content-Type": "application/json",
+    }
+
+
+def anthropic_body(system: str, messages: list, max_tokens: int,
+                   temperature: float, stop: list | None = None,
+                   prefill: str | None = None) -> dict:
+    """Anthropic's native Bedrock body. `system` is a TOP-LEVEL field here, not
+    a message — putting it in `messages` is silently ignored."""
+    msgs = list(messages)
+    if prefill:
+        msgs = msgs + [{"role": "assistant", "content": prefill}]
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": msgs,
+    }
+    if system:
+        body["system"] = system
+    if stop:
+        body["stop_sequences"] = stop
+    return body
+
+
+async def _bedrock_json(system, user, model, max_tokens, temperature):
+    import httpx
+    body = anthropic_body(
+        system, [{"role": "user", "content": user}], max_tokens, temperature,
+        # Prefill: the reply can only continue an object that is already open,
+        # so it cannot begin with prose. Bedrock has no response_format, and
+        # this is the reliable substitute for Claude.
+        prefill="{")
+    async with httpx.AsyncClient(timeout=BEDROCK_TIMEOUT) as client:
+        r = await client.post(_bedrock_url(model), headers=bedrock_headers(),
+                              json=body)
+        r.raise_for_status()
+        data = r.json()
+    text = "".join(b.get("text", "") for b in data.get("content", []))
+    return _extract_json("{" + text)
 
 
 async def _groq_json(system, user, model, max_tokens, temperature):
@@ -128,13 +176,17 @@ async def complete_json(system: str, user: str, *, kind: str = "fast",
         if model:
             try:
                 return await asyncio.wait_for(
-                    asyncio.to_thread(_bedrock_json_sync, system, user, model,
-                                      max_tokens, temperature),
+                    _bedrock_json(system, user, model, max_tokens, temperature),
                     timeout=timeout)
             except Exception as exc:
+                # Fall THROUGH to Groq rather than returning {}. A dropped
+                # decision costs a live turn -- the router loses its lane, the
+                # node check loses its evidence. Groq is already configured and
+                # is a better answer than no answer. Consolidation retries
+                # anyway, so the extra call there is harmless.
                 print(f"[llm_client] bedrock {kind} failed: "
-                      f"{type(exc).__name__}: {exc}", flush=True)
-                return {}
+                      f"{type(exc).__name__}: {exc} -- falling back to groq",
+                      flush=True)
     try:
         return await asyncio.wait_for(
             _groq_json(system, user,

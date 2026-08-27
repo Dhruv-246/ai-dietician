@@ -1,0 +1,279 @@
+"""Core regression suite. Runs with plain python — no pipecat, no langgraph,
+no network, no credentials.
+
+    python3 tests/test_core.py
+
+These live IN THE REPO on purpose. An earlier version lived in a scratch
+directory and was lost with it, taking ~168 assertions of coverage with it.
+Anything that only exists outside version control is not a test suite.
+"""
+import os
+import sys
+import types
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.modules.setdefault("httpx", types.ModuleType("httpx"))
+
+import llm_client as L          # noqa: E402
+import memory_facts as mf       # noqa: E402
+import onboarding_nodes as on   # noqa: E402
+import rag_query as rq          # noqa: E402
+import thread_machine as tm     # noqa: E402
+
+R = []
+def ck(name, cond, detail=""):
+    R.append((name, bool(cond), detail))
+
+
+# ---------------------------------------------------------------- provider --
+def test_llm_client():
+    for k in ("AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID",
+              "AWS_SECRET_ACCESS_KEY", "LLM_PROVIDER"):
+        os.environ.pop(k, None)
+    ck("provider falls back to groq with no credentials", L.provider() == "groq")
+
+    # A Bedrock API key is a bearer token — no access key or secret involved.
+    os.environ["AWS_BEARER_TOKEN_BEDROCK"] = "test"
+    ck("bearer token alone selects bedrock", L.provider() == "bedrock")
+    os.environ["LLM_PROVIDER"] = "groq"
+    ck("LLM_PROVIDER overrides detection", L.provider() == "groq")
+    os.environ.pop("LLM_PROVIDER")
+
+    os.environ["AWS_REGION"] = "ap-south-1"
+    os.environ["BEDROCK_MODEL"] = "anthropic.claude-haiku-4-5-v1:0"
+    ck("one BEDROCK_MODEL serves every job",
+       L.bedrock_model("chat") == L.bedrock_model("fast") == L.bedrock_model("heavy"))
+    os.environ["BEDROCK_FAST_MODEL"] = "fast-model"
+    ck("per-job override wins", L.bedrock_model("fast") == "fast-model"
+       and L.bedrock_model("chat") == "anthropic.claude-haiku-4-5-v1:0")
+    os.environ.pop("BEDROCK_FAST_MODEL")
+
+    url = L._bedrock_url("anthropic.claude-haiku-4-5-v1:0")
+    ck("invoke URL matches the documented Bedrock shape",
+       url == "https://bedrock-runtime.ap-south-1.amazonaws.com"
+              "/model/anthropic.claude-haiku-4-5-v1:0/invoke", url)
+    ck("streaming URL uses invoke-with-response-stream",
+       L._bedrock_url("m", stream=True).endswith("/invoke-with-response-stream"))
+    ck("auth header is a bearer token",
+       L.bedrock_headers()["Authorization"].startswith("Bearer "))
+
+    b = L.anthropic_body("SYS", [{"role": "user", "content": "hi"}], 100, 0.1,
+                         stop=["?"], prefill="{")
+    # `system` is a TOP-LEVEL field for Anthropic on Bedrock. Putting it in
+    # `messages` is silently ignored, which is a very quiet way to lose the
+    # entire personality prompt.
+    ck("system is top-level, not a message", b.get("system") == "SYS")
+    ck("prefill is appended as the assistant turn",
+       b["messages"][-1] == {"role": "assistant", "content": "{"})
+    ck("stop sequences passed through", b.get("stop_sequences") == ["?"])
+    ck("anthropic_version pinned", b.get("anthropic_version") == "bedrock-2023-05-31")
+
+    ck("json parse: bare", L._extract_json('{"a":1}') == {"a": 1})
+    ck("json parse: fenced", L._extract_json('```json\n{"a":1}\n```') == {"a": 1})
+    ck("json parse: wrapped in prose", L._extract_json('sure: {"a":1} ok') == {"a": 1})
+    ck("json parse: garbage yields {}", L._extract_json("not json") == {})
+
+
+# ------------------------------------------------------------- extraction --
+def test_extraction():
+    th = tm.Thread(topic="night hunger",
+                   needed_paths=["current_pattern.dinner.time",
+                                 "current_pattern.dinner.frequent",
+                                 "lifestyle.sleep_time"])
+    cases = [
+        ({"dinner": "7pm"}, "current_pattern.dinner.time"),        # value disambiguates
+        ({"dinner": "roti sabzi"}, "current_pattern.dinner.frequent"),
+        ({"dinner_food": "poha"}, "current_pattern.dinner.frequent"),
+        ({"sleep_time": "11pm"}, "lifestyle.sleep_time"),
+        ({"bedtime": "11pm"}, "lifestyle.sleep_time"),
+        ({"work_routine": "office"}, "lifestyle.schedule"),
+        ({"health_conditions": "PCOS"}, "health.conditions"),
+        ({"blood_type": "O+"}, None),          # generic leaf needs its qualifier
+        ({"pet_name": "Bruno"}, None),           # nothing to do with diet
+    ]
+    for raw, want in cases:
+        got = list(tm.map_extracted(raw, th)[0])
+        ck(f"map {list(raw)[0]!r} -> {want or 'adhoc'}",
+           (got[0] if got else None) == want, got)
+
+
+# ------------------------------------------------------------------ stages --
+def test_stages():
+    g_none = {"known": {}, "stale": [], "missing": ["x"]}
+    g_some = {"known": {"a": "1"}, "stale": [], "missing": ["x"]}
+    ck("REFLECT skipped when nothing is known",
+       tm.next_stage(tm.Thread(topic="t", stage=tm.S_GATHER, stage_turns=2),
+                     g_none, False) == tm.S_ADVISE)
+    ck("REFLECT entered when something is known",
+       tm.next_stage(tm.Thread(topic="t", stage=tm.S_GATHER, stage_turns=2),
+                     g_some, False) == tm.S_REFLECT)
+
+    # QUICK must not become a side door around the advice gate.
+    for stage in (tm.S_UNDERSTAND, tm.S_GATHER, tm.S_REFLECT):
+        ck(f"QUICK gated while thread is at {stage}",
+           tm.quick_directive("FACTUAL", tm.Thread(topic="t", stage=stage))
+           ["may_advise"] is False)
+    for stage in (tm.S_ADVISE, tm.S_CONFIRM):
+        ck(f"QUICK free once thread reaches {stage}",
+           tm.quick_directive("FACTUAL", tm.Thread(topic="t", stage=stage))
+           ["may_advise"] is True)
+    ck("QUICK free with no thread open",
+       tm.quick_directive("FACTUAL")["may_advise"] is True)
+
+    parked = tm.Thread(topic="t", stage=tm.S_GATHER); parked.parked = True
+    ck("a parked thread does not gate QUICK",
+       tm.quick_directive("FACTUAL", parked)["may_advise"] is True)
+
+    # Ordering a model to cite specifics it does not have is an instruction to
+    # invent them — the worst failure mode in a health product.
+    d_empty = tm.stage_directive(tm.Thread(topic="t", stage=tm.S_ADVISE), g_none)
+    ck("ADVISE does not demand a citation it cannot have",
+       "MUST refer to something specific" not in d_empty["directive"])
+    d_known = tm.stage_directive(tm.Thread(topic="t", stage=tm.S_ADVISE),
+                                 {"known": {"a": "1"}, "stale": [], "missing": []})
+    ck("ADVISE demands a citation when facts exist",
+       "MUST refer to something specific" in d_known["directive"])
+
+    ck("identity is deprioritised as a gather target",
+       tm.rank_gaps(["identity.basics.age", "current_pattern.dinner.time"],
+                    ["identity.basics.age", "current_pattern.dinner.time"])[0]
+       == "current_pattern.dinner.time")
+
+
+# ------------------------------------------------------------------ memory --
+def test_memory():
+    t = "User: main gyarah baje sota hoon\nMira: achha\n"
+    ok = mf.apply_patch([], [{"op": "set", "path": "lifestyle.sleep_time",
+                              "value": "11pm",
+                              "evidence": "main gyarah baje sota hoon"}], "r", t)[2]
+    ck("grounded op accepted", ok[0]["applied"] is True, ok[0].get("reason"))
+
+    for label, op in [
+        ("invented path", {"op": "set", "path": "not.a.path", "value": "x",
+                           "evidence": "main gyarah baje sota hoon"}),
+        ("fabricated quote", {"op": "append", "path": "health.conditions",
+                              "value": "diabetes",
+                              "evidence": "patient has diabetes"}),
+        # Mira's own words are not evidence about the user.
+        ("cites Mira not the user", {"op": "append", "path": "health.conditions",
+                                     "value": "x", "evidence": "achha"}),
+        ("no evidence", {"op": "set", "path": "diet.type", "value": "vegan",
+                         "evidence": ""}),
+    ]:
+        a = mf.apply_patch([], [op], "r", t)[2]
+        ck(f"rejected: {label}", a[0]["applied"] is False, a[0].get("reason"))
+
+    rows, inval, _ = mf.apply_patch(
+        [], [{"op": "set", "path": "diet.type", "value": "vegetarian",
+              "evidence": "main vegetarian hoon"}], "r1",
+        "User: main vegetarian hoon", when="2026-01-01T00:00:00Z")
+    rows2, inval2, _ = mf.apply_patch(
+        rows, [{"op": "set", "path": "diet.type", "value": "eggetarian",
+                "evidence": "ab egg khata hoon"}], "r2",
+        "User: ab egg khata hoon", when="2026-02-01T00:00:00Z")
+    ck("a contradiction supersedes rather than deletes", len(inval2) == 1)
+    for r in rows:
+        if r["fact_id"] == inval2[0][0]:
+            r["invalidated_at"] = "2026-02-01T00:00:00Z"
+    view = mf.build_current_view(rows + rows2)
+    ck("projection shows the current value", view["diet"]["type"] == "eggetarian")
+    ck("superseded fact is retained in the ledger",
+       len([f for f in rows + rows2 if f["path"] == "diet.type"]) == 2)
+
+
+# ----------------------------------------------------------------- routing --
+def test_rag_gate():
+    # Devanagari hums have no canonical spelling; the elongated forms are the
+    # ones that used to slip through and trigger a pointless retrieval.
+    for text in ("Yeah.", "हम्म", "हम्म्म", "म्म", "haan", "ok", "अच्छा"):
+        ck(f"retrieval skipped for filler {text!r}", rq.is_retrievable(text)[0] is False)
+    ck("retrieval runs for a real question",
+       rq.is_retrievable("mujhe PCOS hai kya khaun")[0] is True)
+    msgs = [{"role": "user", "content": "mujhe PCOS hai"},
+            {"role": "assistant", "content": "Achha, subah kya khati ho?"}]
+    q, strat = rq.build_query("और कुछ?", msgs)
+    ck("context-dependent query pulls in the previous turn",
+       strat == "contextual" and "PCOS" in q, q)
+
+
+# --------------------------------------------------------------- onboarding --
+def test_onboarding():
+    bad = [p for g in on.NODE_GOALS.values() for p in g["paths"]
+           if p not in mf.SCHEMA]
+    ck("every onboarding path is a real P-3 schema path", not bad, bad)
+    ck("DAILY_EATING needs three of its paths before advancing",
+       on.node_is_covered("DAILY_EATING", {}) is False
+       and on.node_is_covered("DAILY_EATING", {
+           "current_pattern.morning.frequent": "poha",
+           "current_pattern.lunch.frequent": "dal",
+           "current_pattern.dinner.frequent": "roti"}) is True)
+    ck("a node with no paths is trivially covered",
+       on.node_is_covered("GREETING", {}) is True)
+    # min_turns is a conversational floor now, not the progression gate.
+    ck("data-collection nodes are not padded by min_turns",
+       on.NODES["DAILY_EATING"]["min_turns"] == 1
+       and on.NODES["LIFESTYLE"]["min_turns"] == 1)
+    ck("PROBLEM keeps its depth floor", on.NODES["PROBLEM"]["min_turns"] == 3)
+
+    names = {t["name"] for t in on.GLOBAL_TRIGGERS}
+    ck("onboarding-only triggers still exist for P-2",
+       {"DEFLECT", "WHAT_NEXT"} <= names)
+
+
+# ---------------------------------------------------------------- fallback --
+def test_bedrock_falls_back():
+    """A Bedrock outage must cost a slower turn, not a lost decision."""
+    import asyncio
+
+    os.environ["AWS_BEARER_TOKEN_BEDROCK"] = "test"
+    os.environ["BEDROCK_MODEL"] = "anthropic.claude-haiku-4-5-v1:0"
+    os.environ.pop("LLM_PROVIDER", None)
+
+    calls = []
+    orig_b, orig_g = L._bedrock_json, L._groq_json
+
+    async def boom(*a, **k):
+        calls.append("bedrock")
+        raise RuntimeError("bedrock is down")
+
+    async def fine(*a, **k):
+        calls.append("groq")
+        return {"lane": "QUICK"}
+
+    L._bedrock_json, L._groq_json = boom, fine
+    try:
+        got = asyncio.get_event_loop().run_until_complete(
+            L.complete_json("s", "u", kind="fast", timeout=2.0))
+    finally:
+        L._bedrock_json, L._groq_json = orig_b, orig_g
+
+    ck("bedrock is tried first", calls[:1] == ["bedrock"], calls)
+    ck("a bedrock failure falls through to groq", calls == ["bedrock", "groq"], calls)
+    ck("the caller still gets a real decision", got == {"lane": "QUICK"}, got)
+
+    # And the contract that everything else leans on: never raise.
+    L._bedrock_json = L._groq_json = boom
+    try:
+        got2 = asyncio.get_event_loop().run_until_complete(
+            L.complete_json("s", "u", kind="fast", timeout=2.0))
+    finally:
+        L._bedrock_json, L._groq_json = orig_b, orig_g
+    ck("both providers down yields {} and no exception", got2 == {}, got2)
+
+
+def main():
+    for fn in (test_llm_client, test_extraction, test_stages, test_memory,
+               test_rag_gate, test_onboarding, test_bedrock_falls_back):
+        fn()
+    passed = sum(1 for _, c, _ in R if c)
+    print("=" * 74)
+    for name, cond, detail in R:
+        print(f"  {'PASS' if cond else 'FAIL'}  {name}"
+              + (f"\n          -> {detail}" if not cond and detail else ""))
+    print("=" * 74)
+    print(f"  {passed}/{len(R)} passed")
+    return 0 if passed == len(R) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

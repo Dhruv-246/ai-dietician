@@ -19,8 +19,11 @@ google-auth>=2.0.0
 # lifecycle or the generation call.
 langgraph
 
-# AWS Bedrock: the router / node-check / consolidation calls go through
-# boto3's Converse API directly (see llm_client.py).
+# AWS Bedrock. The CONVERSATION model runs through pipecat's own
+# AWSBedrockLLMService (the `aws` extra above), which needs boto3. The three
+# small JSON jobs -- router, node check, consolidation -- skip boto3 and post
+# to the InvokeModel endpoint over plain HTTPS with a bearer token, because a
+# Bedrock API key is a bearer token and needs no SigV4 signing.
 boto3
 
 python-dotenv
