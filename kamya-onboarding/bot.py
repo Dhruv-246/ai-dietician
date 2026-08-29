@@ -1740,6 +1740,24 @@ async def avatar():
     return HTMLResponse(status_code=404)
 
 
+@app.on_event("startup")
+async def _startup_probe():
+    """Time a trivial Bedrock call once per boot and log it.
+
+    Runs in the background so it never delays serving. One 5-token request per
+    deploy is a rounding error in cost, and it answers the question that three
+    rounds of reading code could not: is the ~4s we see on every turn the cost
+    of REACHING this model, or the cost of our prompt? See llm_client.probe.
+    """
+    async def _run():
+        try:
+            res = await llm_client.probe()
+            _log(f"bedrock probe {json.dumps(res, ensure_ascii=False)}")
+        except Exception as exc:
+            _log(f"bedrock probe failed: {type(exc).__name__}: {exc}")
+    asyncio.create_task(_run())
+
+
 @app.get("/healthz")
 async def healthz():
     """Liveness, plus WHICH BUILD is answering.

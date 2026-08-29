@@ -228,3 +228,54 @@ async def complete_json(system: str, user: str, *, kind: str = "fast",
         print(f"[llm_client] groq {kind} failed: {type(exc).__name__}: {exc}",
               flush=True)
         return {}
+
+async def probe(rounds: int = 3) -> dict:
+    """Time the SMALLEST possible Bedrock call, a few times.
+
+    WHY THIS EXISTS. A live call showed 4s to first token, held to within ±5%
+    across 34 samples while the prompt grew steadily through the call. Flat
+    latency under a growing prompt rules out prefill, and 44ms from first
+    token to first audio rules out the pipeline. What is left is fixed
+    per-request overhead -- but "overhead" is a symptom, not a cause, and it
+    could be cross-region routing, auth, or cold start, which have different
+    fixes.
+
+    So: send a request with a trivial prompt and a 5-token ceiling. Generation
+    and prefill are then negligible by construction, and whatever time remains
+    is the floor cost of reaching this model from this region.
+
+      floor ~= 4s   -> the overhead is the round trip itself. Prompt work will
+                       not help; the inference profile or region is the lever.
+      floor << 4s   -> the round trip is fine and the cost is in handling our
+                       actual prompt after all.
+
+    First call in a process also pays TLS and client setup, so rounds are
+    reported separately -- a large first value that then drops is warm-up,
+    not steady-state.
+    """
+    import time
+    if provider() != "bedrock":
+        return {"skipped": "provider is not bedrock"}
+    model = bedrock_model("chat")
+    if not model:
+        return {"skipped": "no bedrock model configured"}
+
+    out = []
+    for _ in range(max(1, rounds)):
+        t0 = time.perf_counter()
+        ok, err = True, ""
+        try:
+            import httpx
+            body = anthropic_body("Reply with the single word ok.",
+                                  [{"role": "user", "content": "ping"}],
+                                  max_tokens=5, temperature=0.0)
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                r = await c.post(_bedrock_url(model), headers=bedrock_headers(),
+                                 json=body)
+                r.raise_for_status()
+                r.json()
+        except Exception as exc:
+            ok, err = False, f"{type(exc).__name__}: {exc}"[:200]
+        out.append({"ms": round((time.perf_counter() - t0) * 1000), "ok": ok,
+                    **({"error": err} if err else {})})
+    return {"model": model, "region": _region(), "rounds": out}
