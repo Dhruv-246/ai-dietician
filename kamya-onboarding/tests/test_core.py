@@ -14,6 +14,7 @@ import types
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.modules.setdefault("httpx", types.ModuleType("httpx"))
 
+import echo_guard               # noqa: E402
 import llm_client as L          # noqa: E402
 import memory_facts as mf       # noqa: E402
 import onboarding_nodes as on   # noqa: E402
@@ -221,6 +222,33 @@ def test_onboarding():
        {"DEFLECT", "WHAT_NEXT"} <= names)
 
 
+# ------------------------------------------------------------ echo guard --
+def test_echo_guard():
+    GREET = "नमस्ते Dhruv! मैं Mira हूँ, Kamya Wellness से. दस मिनट बात कर सकते हैं अभी?"
+
+    # The real failure from the 2026-08-28 call.
+    ck("her own greeting coming back is caught",
+       echo_guard.is_echo("नमस्ते.", GREET) is True)
+    ck("punctuation differences do not defeat the match",
+       echo_guard.is_echo("नमस्ते", GREET) is True)
+    ck("a later fragment of her speech is caught",
+       echo_guard.is_echo("Kamya Wellness", GREET) is True)
+
+    # The dangerous direction: never delete real speech.
+    ck("a genuine answer is let through",
+       echo_guard.is_echo("मैं दिल्ली में रहता हूं", GREET) is False)
+    ck("a long overlapping utterance is a barge-in, not echo",
+       echo_guard.is_echo("नमस्ते मैं अभी बात नहीं कर सकता थोड़ी देर में call कीजिए",
+                          GREET) is False)
+    ck("nothing matches when she has said nothing",
+       echo_guard.is_echo("नमस्ते.", "") is False)
+    ck("an empty transcript is not echo", echo_guard.is_echo("", GREET) is False)
+    ck("a one-or-two letter transcript never counts as echo",
+       echo_guard.is_echo("जी", GREET) is False)
+    ck("unrelated short speech is let through",
+       echo_guard.is_echo("हाँ बिल्कुल", "और work क्या करते हैं आप?") is False)
+
+
 # ------------------------------------------------------------ reply shape --
 def _shape(chunks, cap=32):
     """Run a streamed reply through the shaper; return what TTS would speak."""
@@ -349,7 +377,7 @@ def test_bedrock_falls_back():
 
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
-               test_rag_gate, test_onboarding, test_reply_shape, test_prompt_invariants,
+               test_rag_gate, test_onboarding, test_echo_guard, test_reply_shape, test_prompt_invariants,
                test_bedrock_falls_back):
         fn()
     passed = sum(1 for _, c, _ in R if c)

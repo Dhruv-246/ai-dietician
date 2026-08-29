@@ -107,6 +107,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 import consolidate
 import llm_client
+import echo_guard
 import reply_shape
 import memory_facts
 import memory_store
@@ -466,9 +467,10 @@ class _DiagObserver(BaseObserver):
     LLM responding, TTS producing audio, bot speaking — and any ErrorFrame, so
     /debug can show whether the LLM/TTS actually produced audio or errored."""
 
-    def __init__(self, room_name: str):
+    def __init__(self, room_name: str, bot_speech=None):
         super().__init__()
         self._room = room_name
+        self._bot = bot_speech
         self._seen: set = set()
 
     async def on_push_frame(self, data: "FramePushed"):
@@ -514,6 +516,38 @@ class _DiagObserver(BaseObserver):
                  f"(eot_timeout_ms={os.getenv('DEEPGRAM_EOT_TIMEOUT_MS', '2000')})")
             self._spoke_end = None
             return
+
+        if self._bot is not None:
+            # Accumulate as she streams, so an echo arriving mid-reply is
+            # matched against what she has said SO FAR, not the finished text.
+            if isinstance(frame, LLMFullResponseStartFrame):
+                self._bot.text = ""
+            elif isinstance(frame, LLMTextFrame):
+                self._bot.text += getattr(frame, "text", "") or ""
+            elif isinstance(frame, BotStartedSpeakingFrame):
+                self._bot.started()
+            elif isinstance(frame, BotStoppedSpeakingFrame):
+                self._bot.stopped()
+
+        # TIME TO FIRST TOKEN, measured separately from time to first audio.
+        # Without this the log cannot tell "Claude is slow to start" apart from
+        # "the pipeline is holding text back before TTS" -- both look like one
+        # gap between `llm responding` and `tts started`, and they need
+        # completely different fixes. Removing stop=["?"] was supposed to close
+        # that gap and did not, which is exactly the ambiguity this resolves.
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self._gen_start = time.perf_counter()
+            self._first_tok = None
+        elif isinstance(frame, LLMTextFrame) and getattr(self, "_gen_start", None):
+            if getattr(self, "_first_tok", None) is None:
+                self._first_tok = time.perf_counter()
+                _log(f"llm first token +{(self._first_tok - self._gen_start)*1000:.0f}ms")
+        elif isinstance(frame, TTSStartedFrame) and getattr(self, "_gen_start", None):
+            gen = (time.perf_counter() - self._gen_start) * 1000
+            ttft = ((self._first_tok - self._gen_start) * 1000
+                    if getattr(self, "_first_tok", None) else -1)
+            _log(f"tts first audio +{gen:.0f}ms (llm first token +{ttft:.0f}ms, "
+                 f"so {gen - ttft:.0f}ms was spent AFTER the first token)")
 
         for cls, label in (
             (LLMFullResponseStartFrame, "llm responding"),
@@ -621,6 +655,37 @@ def _transcript_confidence(frame):
     return None
 
 
+class _BotSpeech:
+    """What Mira is saying right now, shared with TranscriptGate so it can
+    recognise her own voice coming back in through the microphone.
+
+    TranscriptGate sits immediately after STT, upstream of everything, so it
+    never sees the bot's own frames. The observers see every frame, so they
+    write here and the gate reads.
+    """
+
+    # How long after she stops speaking her voice can still arrive as a
+    # transcript. Deepgram buffers, so echo lands slightly late.
+    TAIL_SECONDS = 2.0
+
+    def __init__(self):
+        self.text = ""
+        self.speaking = False
+        self.stopped_at = 0.0
+
+    def started(self):
+        self.speaking = True
+
+    def stopped(self):
+        self.speaking = False
+        self.stopped_at = time.perf_counter()
+
+    def recently_active(self):
+        return self.speaking or (
+            self.stopped_at
+            and (time.perf_counter() - self.stopped_at) < self.TAIL_SECONDS)
+
+
 class TranscriptGate(FrameProcessor):
     """Drop unusable transcriptions before they reach RAG or the LLM.
 
@@ -647,9 +712,13 @@ class TranscriptGate(FrameProcessor):
     """
 
     MAX_STRIKES = 2
+    # Above this length an overlapping transcript is treated as a genuine
+    # barge-in, never as echo. Echo is short: the first word or two she says.
+    ECHO_MAX_WORDS = 6
 
-    def __init__(self, min_confidence=None):
+    def __init__(self, min_confidence=None, bot_speech=None):
         super().__init__()
+        self._bot = bot_speech
         env = (os.getenv("STT_MIN_CONFIDENCE") or "").strip()
         self._min_conf = min_confidence if min_confidence is not None else (
             float(env) if env else 0.0)
@@ -659,6 +728,27 @@ class TranscriptGate(FrameProcessor):
             "Aawaz kat rahi hai — ek baar phir bataiye?",
         ]
         self._i = 0
+
+    def _echo_reason(self, text):
+        """Is this Mira's own voice coming back through the speakers?
+
+        Seen on the 2026-08-28 call: her greeting began "नमस्ते Dhruv" and a
+        user transcript "नमस्ते." arrived one second later, while she was
+        still speaking -- which also counted as a barge-in and cut her off
+        mid-sentence. The user had not said a word.
+
+        Deliberately narrow, because a false positive here deletes something
+        the user really said:
+          - only while she is speaking, or just after
+          - only SHORT transcripts; a long utterance that merely overlaps is a
+            real barge-in and must get through
+          - and only when the words actually appear in what she is saying
+        """
+        if not (self._bot and self._bot.recently_active() and self._bot.text):
+            return ""
+        if echo_guard.is_echo(text, self._bot.text, self.ECHO_MAX_WORDS):
+            return f"echo of Mira's own speech ({text!r})"
+        return ""
 
     def _reason(self, frame, text):
         conf = _transcript_confidence(frame)
@@ -680,6 +770,16 @@ class TranscriptGate(FrameProcessor):
             and (getattr(frame, "text", "") or "").strip()
         ):
             text = frame.text.strip()
+
+            # Echo is dropped SILENTLY and costs no strike. Re-prompting would
+            # have Mira apologise to herself for not hearing herself, and the
+            # strike cap would then let the echo through anyway -- turning a
+            # recoverable glitch into a conversation with her own reflection.
+            echo = self._echo_reason(text)
+            if echo:
+                _log(f"transcript DROPPED ({echo}) — not counted as a strike")
+                return
+
             reason = self._reason(frame, text)
             if reason:
                 if self._strikes < self.MAX_STRIKES:
@@ -892,11 +992,18 @@ class ReplyShapeFilter(FrameProcessor):
                     _log(f"  shape filter{self._label}: over cap "
                          f"({sh.words} words, cap {sh._cap}) -- delivered whole")
             elif isinstance(frame, LLMTextFrame):
-                keep, stop = sh.feed(getattr(frame, "text", "") or "")
-                if keep:
+                text = getattr(frame, "text", "") or ""
+                keep, _stop = sh.feed(text)
+                if keep == text:
+                    # PASS THE ORIGINAL FRAME THROUGH -- do not clone it.
+                    # Observers dedupe by frame ID, so a fresh frame carrying
+                    # identical text is counted as new: the caption observer
+                    # appended both the upstream frame and the copy and every
+                    # reply went out at exactly double length, interleaved.
+                    # Only mint a new frame when the text actually changed.
+                    await self.push_frame(frame, direction)
+                elif keep:
                     await self.push_frame(LLMTextFrame(keep), direction)
-                if stop or not keep:
-                    return
                 return
         await self.push_frame(frame, direction)
 
@@ -1358,12 +1465,15 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
 
     # Pipeline mid-section: onboarding uses NodeProcessor (state machine);
     # ongoing uses RAGProcessor (knowledge base retrieval).
+    # Shared between the observer (which sees the bot's frames) and the gate
+    # (which sits upstream and does not).
+    _bot_speech = _BotSpeech()
     stages = [
         transport.input(),            # mic in (from LiveKit)
         stt,                          # speech -> text
         # Sits immediately after STT so an unusable transcript never reaches
         # the node machine, RAG, or the LLM. Applies to BOTH modes.
-        TranscriptGate(),
+        TranscriptGate(bot_speech=_bot_speech),
     ]
     thread_proc = None
     if mode == "onboarding":
@@ -1428,7 +1538,7 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
     task = PipelineTask(
         pipeline,
         params=PipelineParams(enable_metrics=True),
-        observers=[_DiagObserver(room_name), _CaptionObserver(transport)],
+        observers=[_DiagObserver(room_name, _bot_speech), _CaptionObserver(transport)],
     )
 
     @transport.event_handler("on_first_participant_joined")
