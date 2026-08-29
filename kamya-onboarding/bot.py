@@ -1335,6 +1335,21 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
                     max_tokens=_max_tok,
                     temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
                     stop_sequences=_stops,
+                    # Bedrock's own latency levers, both OFF by default
+                    # because support varies by model, region and inference
+                    # profile, and an unsupported value fails the request --
+                    # which on this path means a silent call with no fallback.
+                    # Turn them on one at a time and watch `llm first token`.
+                    #   BEDROCK_LATENCY=optimized       (latency-optimized inference)
+                    #   BEDROCK_PROMPT_CACHING=1        (AWS: up to 85% off TTFT)
+                    # Caching will do little until the system prompt stops
+                    # being rebuilt each turn with a hint in the MIDDLE -- a
+                    # cache matches a stable PREFIX, and a varying middle
+                    # invalidates the 6.5k of rules that follow it.
+                    latency=(os.getenv("BEDROCK_LATENCY", "").strip()
+                             or "standard"),
+                    enable_prompt_caching=os.getenv(
+                        "BEDROCK_PROMPT_CACHING", "0") != "0",
                 ),
             )
         else:

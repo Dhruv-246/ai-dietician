@@ -70,6 +70,20 @@ def test_llm_client():
     ck("stop sequences passed through", b.get("stop_sequences") == ["?"])
     ck("anthropic_version pinned", b.get("anthropic_version") == "bedrock-2023-05-31")
 
+    # The small JSON jobs may run on a different provider from the
+    # conversation: they are classifiers the user never hears, and every
+    # Bedrock request cost ~4s of fixed overhead before its first token.
+    os.environ["GROQ_API_KEY"] = "test"
+    os.environ.pop("LLM_FAST_PROVIDER", None)
+    ck("fast jobs default to groq when a key exists", L.fast_provider() == "groq")
+    ck("the conversation model stays on bedrock", L.provider() == "bedrock")
+    os.environ["LLM_FAST_PROVIDER"] = "bedrock"
+    ck("fast jobs can be forced back to bedrock", L.fast_provider() == "bedrock")
+    os.environ.pop("LLM_FAST_PROVIDER")
+    os.environ.pop("GROQ_API_KEY")
+    ck("without a groq key fast jobs follow the main provider",
+       L.fast_provider() == L.provider())
+
     ck("json parse: bare", L._extract_json('{"a":1}') == {"a": 1})
     ck("json parse: fenced", L._extract_json('```json\n{"a":1}\n```') == {"a": 1})
     ck("json parse: wrapped in prose", L._extract_json('sure: {"a":1} ok') == {"a": 1})

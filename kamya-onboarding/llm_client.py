@@ -38,6 +38,32 @@ def bedrock_configured() -> bool:
                     and os.getenv("AWS_SECRET_ACCESS_KEY")))
 
 
+def fast_provider() -> str:
+    """Which provider serves the SMALL JSON jobs -- the P-3 router and the P-2
+    node check. Deliberately allowed to differ from the conversation model.
+
+    Measured on the 2026-08-29 call: every Bedrock request carried ~4s of
+    fixed overhead before its first token (34 samples, 3847-4217ms -- a spread
+    of ±5%, which is routing cost, not generation). The node check is a second
+    such request, and it runs BEFORE generation starts, so the user waited
+    ~3s for it and then ~4s for the reply.
+
+    These jobs emit a small JSON object that the user never sees or hears.
+    Nothing about them needs Claude's Hinglish prose quality -- they are
+    classifiers. Groq answers them in a fraction of the time, so the default
+    is Groq whenever a key is present, and the conversation model stays on
+    Claude where the quality actually matters.
+
+    Force with LLM_FAST_PROVIDER=bedrock|groq.
+    """
+    explicit = (os.getenv("LLM_FAST_PROVIDER") or "").strip().lower()
+    if explicit in ("bedrock", "groq"):
+        return explicit
+    if os.getenv("GROQ_API_KEY"):
+        return "groq"
+    return provider()
+
+
 def provider() -> str:
     explicit = (os.getenv("LLM_PROVIDER") or "").strip().lower()
     if explicit in ("bedrock", "groq"):
@@ -171,7 +197,12 @@ async def complete_json(system: str, user: str, *, kind: str = "fast",
     Callers already treat {} as "no decision" and fall back to safe defaults,
     so a provider outage degrades behaviour instead of breaking a live call.
     """
-    if provider() == "bedrock":
+    # "fast" jobs may run on a different provider from the conversation --
+    # see fast_provider(). "heavy" (consolidation) runs after hangup, where
+    # latency is irrelevant and schema adherence is everything, so it follows
+    # the main provider.
+    chosen = fast_provider() if kind == "fast" else provider()
+    if chosen == "bedrock":
         model = bedrock_model(kind)
         if model:
             try:
