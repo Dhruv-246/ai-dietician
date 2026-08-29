@@ -263,6 +263,46 @@ def test_echo_guard():
        echo_guard.is_echo("हाँ बिल्कुल", "और work क्या करते हैं आप?") is False)
 
 
+# ------------------------------------------------------------ prompt size --
+def test_global_rules_not_duplicated():
+    """GLOBAL_RULES must appear exactly ONCE, and must still be LAST.
+
+    build_node_prompt() already appends the rules, and both hint paths then
+    appended them AGAIN -- 2,278 tokens of rules Claude had just read, on
+    every turn carrying a hint. Fixing it must not change WHICH instructions
+    Claude sees, nor their priority order: the rules stay last, where the
+    model weights them most.
+    """
+    prof = {"name": "Dhruv", "diet": "veg"}
+    ext = {"current_pattern.dinner.time": "9pm"}
+    G = on.GLOBAL_RULES
+    hint = "\n\nStill needed: dinner. Ask ONE question.\n"
+
+    node_only = on.build_node_prompt("DAILY_EATING", prof, ext, include_rules=False)
+    full = on.build_node_prompt("DAILY_EATING", prof, ext)
+
+    ck("include_rules=False omits the rules", G not in node_only)
+    ck("the default still appends them exactly once", full.count(G) == 1)
+    ck("no-hint prompt is unchanged", full == node_only + "\n" + G)
+
+    after = node_only + hint + "\n" + G
+    ck("hint path carries GLOBAL_RULES exactly once", after.count(G) == 1)
+    ck("GLOBAL_RULES is still the LAST thing in the prompt",
+       after.rstrip().endswith(G.rstrip()))
+    ck("the hint survives", hint.strip() in after)
+    ck("node instructions survive", "daily food" in after)
+    ck("profile survives", "Dhruv" in after)
+    ck("extracted facts survive", "9pm" in after)
+
+    # The decisive check: only a DUPLICATE was removed, never an instruction.
+    before = full + hint + "\n" + G          # the old, doubled construction
+    lost = ({l.strip() for l in before.splitlines() if l.strip()}
+            - {l.strip() for l in after.splitlines() if l.strip()})
+    ck("no instruction line is lost, only the duplicate copy", not lost, list(lost)[:3])
+    ck("and it is materially smaller", len(before) - len(after) > 6000,
+       len(before) - len(after))
+
+
 # ------------------------------------------------------------ reply shape --
 def _shape(chunks, cap=32):
     """Run a streamed reply through the shaper; return what TTS would speak."""
@@ -391,7 +431,9 @@ def test_bedrock_falls_back():
 
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
-               test_rag_gate, test_onboarding, test_echo_guard, test_reply_shape, test_prompt_invariants,
+               test_rag_gate, test_onboarding, test_echo_guard,
+               test_global_rules_not_duplicated, test_reply_shape,
+               test_prompt_invariants,
                test_bedrock_falls_back):
         fn()
     passed = sum(1 for _, c, _ in R if c)

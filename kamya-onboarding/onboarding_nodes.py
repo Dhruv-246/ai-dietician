@@ -686,9 +686,16 @@ def check_global_trigger(text: str) -> str | None:
 # Node prompt builder                                                          #
 # --------------------------------------------------------------------------- #
 
-def build_node_prompt(node_name: str, profile: dict, extracted: dict) -> str:
+def build_node_prompt(node_name: str, profile: dict, extracted: dict,
+                      include_rules: bool = True) -> str:
     """Build the full system prompt for the given node, injecting profile data,
-    extracted info from previous nodes, and global rules."""
+    extracted info from previous nodes, and global rules.
+
+    `include_rules=False` returns everything EXCEPT the trailing GLOBAL_RULES,
+    for callers that need to append a per-turn hint and then the rules
+    themselves. Without it those callers appended GLOBAL_RULES to a string
+    that already ended with GLOBAL_RULES -- see the callers for what that
+    cost."""
     node = NODES[node_name]
     prompt = node["prompt"]
 
@@ -717,6 +724,8 @@ def build_node_prompt(node_name: str, profile: dict, extracted: dict) -> str:
         ext_block = "  (nothing yet — this is the start)"
     prompt = prompt.replace("{{extracted}}", ext_block)
 
+    if not include_rules:
+        return prompt
     return prompt + "\n" + GLOBAL_RULES
 
 
@@ -928,7 +937,12 @@ def create_node_processor(context, profile: dict, log_fn=None):
                 hint = f"\n\nIMPORTANT: The user just asked something that you should handle with this exact response first: \"{global_response}\"\nSay this EXACTLY, then continue naturally with your current task. Do not give any other advice.\n"
                 msgs = self._context.get_messages()
                 if msgs:
-                    base = build_node_prompt(self._current_node, self._profile, self._extracted)
+                    # include_rules=False: GLOBAL_RULES is appended once,
+                    # below, AFTER the hint. Passing the default here appended
+                    # a second identical copy -- 2,278 tokens of rules Claude
+                    # had already read, on every turn that carried a hint.
+                    base = build_node_prompt(self._current_node, self._profile,
+                                             self._extracted, include_rules=False)
                     msgs[0] = {"role": "system", "content": base + hint + "\n" + GLOBAL_RULES}
                     self._context.set_messages(msgs)
                 # Don't count global trigger turns toward node transition.
@@ -1000,8 +1014,10 @@ def create_node_processor(context, profile: dict, log_fn=None):
             elif hint:
                 msgs = self._context.get_messages()
                 if msgs:
+                    # See the note on the other hint path above: without
+                    # include_rules=False this appended GLOBAL_RULES twice.
                     base = build_node_prompt(self._current_node, self._profile,
-                                             self._extracted)
+                                             self._extracted, include_rules=False)
                     msgs[0] = {"role": "system",
                                "content": base + hint + "\n" + GLOBAL_RULES}
                     self._context.set_messages(msgs)
