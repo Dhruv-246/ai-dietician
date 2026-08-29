@@ -311,3 +311,56 @@ async def count_tokens(system: str, user: str = "ping") -> dict:
                                     if usage.get("input_tokens") else None)}
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+async def compare_models(models, system: str, rounds: int = 2) -> list:
+    """Time the SAME real prompt on several models, with caching enabled.
+
+    Answers three questions at once, per model:
+      - time to first byte with a realistic prefill (not a toy ping)
+      - whether a cache checkpoint is actually created (cache_write > 0)
+      - whether the SECOND identical call reads it back (cache_read > 0)
+
+    That last one is the whole question for Sonnet: Haiku 4.5 needs a
+    4,096-token prefix to cache and this prompt measures 2,748, so it can
+    never cache. Sonnet 4.5/4.6 need only 1,024, so the same prompt should
+    cache -- but "should" has been wrong repeatedly here, so measure it.
+
+    max_tokens=4: generation is negligible, so what is timed is round trip
+    plus prefill, which is exactly the cost caching targets.
+    """
+    import time
+    out = []
+    for model in models:
+        rows = []
+        for i in range(rounds):
+            t0 = time.perf_counter()
+            try:
+                import httpx
+                body = {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": 4,
+                    "temperature": 0.0,
+                    # cache_control on the system block is what creates the
+                    # checkpoint. Under the minimum it is silently ignored.
+                    "system": [{"type": "text", "text": system,
+                                "cache_control": {"type": "ephemeral"}}],
+                    "messages": [{"role": "user", "content": "ping"}],
+                }
+                async with httpx.AsyncClient(timeout=60.0) as c:
+                    r = await c.post(_bedrock_url(model), headers=bedrock_headers(),
+                                     json=body)
+                    r.raise_for_status()
+                    u = (r.json() or {}).get("usage", {}) or {}
+                rows.append({
+                    "call": i + 1,
+                    "ms": round((time.perf_counter() - t0) * 1000),
+                    "in": u.get("input_tokens"),
+                    "cache_write": u.get("cache_creation_input_tokens"),
+                    "cache_read": u.get("cache_read_input_tokens"),
+                })
+            except Exception as exc:
+                rows.append({"call": i + 1,
+                             "error": f"{type(exc).__name__}: {exc}"[:160]})
+                break
+        out.append({"model": model, "rounds": rows})
+    return out

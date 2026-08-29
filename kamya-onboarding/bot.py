@@ -1763,6 +1763,19 @@ async def _startup_probe():
                         "GREETING", {"name": "probe"}, {}))):
                 tk = await llm_client.count_tokens(text)
                 _log(f"token count {label} {json.dumps(tk, ensure_ascii=False)}")
+
+            # Model comparison, opt-in. Off by default: it calls models the
+            # account may not have enabled, and spends tokens on every boot.
+            # Set BEDROCK_COMPARE to a comma-separated model id list to run it.
+            cmp_models = [m.strip() for m in
+                          (os.getenv("BEDROCK_COMPARE", "") or "").split(",")
+                          if m.strip()]
+            if cmp_models:
+                sysprompt = onboarding_nodes.build_node_prompt(
+                    "DAILY_EATING", {"name": "probe"}, {})
+                res = await llm_client.compare_models(cmp_models, sysprompt)
+                for row in res:
+                    _log(f"model compare {json.dumps(row, ensure_ascii=False)}")
         except Exception as exc:
             _log(f"bedrock probe failed: {type(exc).__name__}: {exc}")
     asyncio.create_task(_run())
