@@ -1753,6 +1753,16 @@ async def _startup_probe():
         try:
             res = await llm_client.probe()
             _log(f"bedrock probe {json.dumps(res, ensure_ascii=False)}")
+            # How many TOKENS the real prompt costs. Haiku 4.5 will not cache
+            # a prefix under 4,096 tokens, and it fails silently -- the call
+            # succeeds, nothing is cached. Character counts cannot answer this
+            # because Devanagari tokenises far more expensively than Latin.
+            for label, text in (
+                    ("GLOBAL_RULES", onboarding_nodes.GLOBAL_RULES),
+                    ("GREETING_full", onboarding_nodes.build_node_prompt(
+                        "GREETING", {"name": "probe"}, {}))):
+                tk = await llm_client.count_tokens(text)
+                _log(f"token count {label} {json.dumps(tk, ensure_ascii=False)}")
         except Exception as exc:
             _log(f"bedrock probe failed: {type(exc).__name__}: {exc}")
     asyncio.create_task(_run())

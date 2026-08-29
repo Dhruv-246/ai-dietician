@@ -279,3 +279,35 @@ async def probe(rounds: int = 3) -> dict:
         out.append({"ms": round((time.perf_counter() - t0) * 1000), "ok": ok,
                     **({"error": err} if err else {})})
     return {"model": model, "region": _region(), "rounds": out}
+
+async def count_tokens(system: str, user: str = "ping") -> dict:
+    """Ask Bedrock how many INPUT TOKENS a given prompt actually costs.
+
+    Decision-critical for prompt caching: Claude Haiku 4.5 will not create a
+    cache checkpoint for a prefix under 4,096 tokens. Below that the request
+    still succeeds and simply is not cached, silently. Character counts cannot
+    settle this -- Devanagari tokenises far more expensively than Latin, and
+    this prompt is a mix -- so ask the model rather than estimate.
+
+    Sends max_tokens=1, so generation cost is nil and only the prefill is
+    measured.
+    """
+    if provider() != "bedrock":
+        return {"skipped": "provider is not bedrock"}
+    model = bedrock_model("chat")
+    if not model:
+        return {"skipped": "no bedrock model configured"}
+    try:
+        import httpx
+        body = anthropic_body(system, [{"role": "user", "content": user}],
+                              max_tokens=1, temperature=0.0)
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            r = await c.post(_bedrock_url(model), headers=bedrock_headers(),
+                             json=body)
+            r.raise_for_status()
+            usage = (r.json() or {}).get("usage", {}) or {}
+        return {"chars": len(system), "input_tokens": usage.get("input_tokens"),
+                "chars_per_token": (round(len(system) / usage["input_tokens"], 2)
+                                    if usage.get("input_tokens") else None)}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"[:200]}
