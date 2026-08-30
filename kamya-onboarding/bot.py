@@ -1776,6 +1776,14 @@ async def _startup_probe():
                 res = await llm_client.compare_models(cmp_models, sysprompt)
                 for row in res:
                     _log(f"model compare {json.dumps(row, ensure_ascii=False)}")
+
+            # Transport comparison: the same model reached two ways. Runs
+            # whenever BEDROCK_PROBE_TRANSPORT is set.
+            if os.getenv("BEDROCK_PROBE_TRANSPORT", "") not in ("", "0"):
+                sysprompt = onboarding_nodes.build_node_prompt(
+                    "DAILY_EATING", {"name": "probe"}, {})
+                tr = await llm_client.probe_transport(sysprompt)
+                _log(f"transport compare {json.dumps(tr, ensure_ascii=False)}")
         except Exception as exc:
             _log(f"bedrock probe failed: {type(exc).__name__}: {exc}")
     asyncio.create_task(_run())

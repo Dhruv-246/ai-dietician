@@ -413,3 +413,63 @@ async def compare_models(models, system: str, rounds: int = 2) -> list:
                            "median": nums[len(nums) // 2] if nums else None}
         out.append({"model": model, "rounds": rows, "ttft_stream_ms": ttft})
     return out
+
+async def probe_transport(system: str, rounds: int = 4) -> dict:
+    """Compare the two ways of reaching the SAME model, on the same prompt.
+
+    Live calls show ~4.1s to first token. Calling Bedrock directly over httpx
+    with the same prompt shows ~2.0s. That ~2s gap is not the model, not
+    prefill, and not caching -- all three were measured and ruled out. It is
+    the transport.
+
+    Pipecat reaches Bedrock through aiobotocore's Converse API, and it opens a
+    NEW client inside the request path on every single turn:
+
+        async with self._aws_session.create_client("bedrock-runtime", ...)
+
+    Creating a botocore client is not cheap -- it loads service model JSON,
+    resolves the endpoint, and negotiates a fresh TLS connection. Doing that
+    per turn, rather than once per call, is a plausible home for a fixed
+    ~2s. This times both paths back to back so the guess becomes a number.
+    """
+    import time
+    model = bedrock_model("chat")
+    out = {"model": model, "httpx_stream_ms": [], "aiobotocore_converse_ms": []}
+
+    for _ in range(rounds):
+        try:
+            out["httpx_stream_ms"].append(
+                await _ttft_stream(model, system, False, 64))
+        except Exception as exc:
+            out["httpx_stream_ms"].append(f"{type(exc).__name__}")
+            break
+
+    for _ in range(rounds):
+        t0 = time.perf_counter()
+        try:
+            import aiobotocore.session
+            sess = aiobotocore.session.get_session()
+            # Deliberately INSIDE the loop -- this mirrors what pipecat does
+            # per turn. If the cost lives here, this is where it shows up.
+            async with sess.create_client("bedrock-runtime",
+                                          region_name=_region()) as client:
+                resp = await client.converse_stream(
+                    modelId=model,
+                    system=[{"text": system}],
+                    messages=[{"role": "user",
+                               "content": [{"text": "Ek chhota sawaal poochho."}]}],
+                    inferenceConfig={"maxTokens": 64, "temperature": 0.0},
+                )
+                async for _ev in resp["stream"]:
+                    break
+            out["aiobotocore_converse_ms"].append(
+                round((time.perf_counter() - t0) * 1000))
+        except Exception as exc:
+            out["aiobotocore_converse_ms"].append(
+                f"{type(exc).__name__}: {exc}"[:120])
+            break
+
+    for k in ("httpx_stream_ms", "aiobotocore_converse_ms"):
+        nums = sorted(v for v in out[k] if isinstance(v, int))
+        out[k + "_median"] = nums[len(nums) // 2] if nums else None
+    return out
