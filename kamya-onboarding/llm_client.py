@@ -312,6 +312,36 @@ async def count_tokens(system: str, user: str = "ping") -> dict:
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
+async def _ttft_stream(model: str, system: str, cache: bool, max_tokens: int):
+    """Time to FIRST BYTE from the streaming endpoint.
+
+    The non-streaming probe measures a whole request; a live call measures
+    time to first token, and generates ~40-60 tokens rather than 4. Those are
+    different quantities, so a conclusion drawn from one does not transfer to
+    the other. This uses invoke-with-response-stream and stops at the first
+    byte of the body, which is the closest analogue to what the pipeline logs
+    as `llm first token`.
+    """
+    import time
+    import httpx
+    sysblock = [{"type": "text", "text": system}]
+    if cache:
+        sysblock[0]["cache_control"] = {"type": "ephemeral"}
+    body = {"anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens, "temperature": 0.0,
+            "system": sysblock,
+            "messages": [{"role": "user", "content":
+                          "Ek chhota sawaal poochho."}]}
+    t0 = time.perf_counter()
+    async with httpx.AsyncClient(timeout=60.0) as c:
+        async with c.stream("POST", _bedrock_url(model, stream=True),
+                            headers=bedrock_headers(), json=body) as r:
+            r.raise_for_status()
+            async for _chunk in r.aiter_bytes():
+                return round((time.perf_counter() - t0) * 1000)
+    return None
+
+
 async def compare_models(models, system: str, rounds: int = 2) -> list:
     """Time the SAME real prompt on several models, with caching enabled.
 
@@ -362,5 +392,24 @@ async def compare_models(models, system: str, rounds: int = 2) -> list:
                 rows.append({"call": i + 1,
                              "error": f"{type(exc).__name__}: {exc}"[:160]})
                 break
-        out.append({"model": model, "rounds": rows})
+
+        # Streaming time-to-first-byte, with and without caching, at a
+        # realistic output length. Several rounds because a two-sample
+        # comparison cannot survive this endpoint's variance -- an earlier
+        # run of it spread 1671-3178ms on one model.
+        ttft = {}
+        for label, cache in (("nocache", False), ("cached", True)):
+            vals = []
+            for _ in range(5):
+                try:
+                    v = await _ttft_stream(model, system, cache, 64)
+                    if v:
+                        vals.append(v)
+                except Exception as exc:
+                    vals.append(f"{type(exc).__name__}")
+                    break
+            nums = sorted(v for v in vals if isinstance(v, int))
+            ttft[label] = {"all": vals,
+                           "median": nums[len(nums) // 2] if nums else None}
+        out.append({"model": model, "rounds": rows, "ttft_stream_ms": ttft})
     return out
