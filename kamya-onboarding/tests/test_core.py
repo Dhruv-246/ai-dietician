@@ -263,6 +263,57 @@ def test_echo_guard():
        echo_guard.is_echo("हाँ बिल्कुल", "और work क्या करते हैं आप?") is False)
 
 
+# ------------------------------------------------------------- safety net --
+def test_trigger_backstop():
+    """The regex misses real disclosures. There must be a second layer.
+
+    On the 2026-08-31 call "Recently मुझे heart attack आया था" matched NO
+    pattern — the MEDICAL list looks for numeric readings, "diagnosed with"
+    and "doctor ne bola" — so Mira acknowledged it with "ओह." and carried on
+    asking about motivation. "paid plan कितने का है" missed too, and she
+    invented her own pricing answer.
+    """
+    # The misses are real; keep them as the thing being defended against.
+    for text in ("Recently मुझे heart attack आया था.",
+                 "तुम्हारा paid plan कितने का है मेरा?",
+                 "मुझे कोई shortcut बताओ ना, नींद पूरी कैसे करूँ?"):
+        ck(f"regex alone still misses: {text[:34]}",
+           on.check_global_trigger(text) is None)
+
+    # So the checker must be able to name the category semantically...
+    import inspect
+    chk = inspect.getsource(on)
+    ck("the checker asks for a trigger category", '"trigger": null|"MEDICAL"' in chk)
+    ck("a health EVENT counts as MEDICAL, not just a diagnosis",
+       "heart attack" in chk and "MEDICAL" in chk)
+    ck("ambiguity resolves toward MEDICAL",
+       "When unsure between null and MEDICAL, choose MEDICAL" in chk)
+
+    # ...and every category must map to its fixed wording.
+    for name in ("MEDICAL", "PRICING", "DEFLECT", "WHAT_NEXT",
+                 "MIRA_IDENTITY", "SENSITIVE"):
+        ck(f"{name} has a scripted response", bool(on.trigger_response(name)))
+    ck("an unknown category yields nothing rather than guessing",
+       on.trigger_response("NOT_A_TRIGGER") is None)
+
+    ck("the backstop reuses the scripted-response hint",
+       "hint = global_trigger_hint(scripted)" in chk)
+    ck("and the turn is not charged to the node", "semantic trigger" in chk)
+
+
+def test_no_advice_no_promises():
+    g = on.GLOBAL_RULES
+    ck("advice is refused even when asked directly",
+       "EVEN WHEN THEY ASK DIRECTLY" in g)
+    ck("the hedged sleep answer is named as a violation",
+       "sleep को बेहतर बना सकते हैं" in g)
+    ck("naming any lever counts as advice", "is already advice" in g)
+    ck("promises are banned, closing included",
+       "NEVER PROMISE ANYTHING" in g and "closing" in g)
+    ck("the invented plan-and-message promise is named",
+       "personalized plan बनाएंगे" in g)
+
+
 # ------------------------------------------------------- volunteered facts --
 def test_capture_is_not_node_scoped():
     """A fact given early must be kept, not thrown away.
@@ -504,7 +555,8 @@ def test_bedrock_falls_back():
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
                test_rag_gate, test_onboarding, test_echo_guard,
-               test_global_rules_not_duplicated, test_capture_is_not_node_scoped,
+               test_global_rules_not_duplicated, test_trigger_backstop,
+               test_no_advice_no_promises, test_capture_is_not_node_scoped,
                test_register_and_banned_words, test_offtopic_bridge,
                test_reply_shape,
                test_prompt_invariants,

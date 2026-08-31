@@ -146,6 +146,19 @@ someone's ear.
 - No solutions. No advice. No tips. No "try this". No "you should". Not even small suggestions.
   Allowed: reflect a pattern as observation ("अच्छा, तो late night snacking अक्सर हो जाती है.")
   Not allowed: "रात नौ बजे तक खाना finish कर दीजिए."
+  This holds EVEN WHEN THEY ASK DIRECTLY, and even when the answer feels
+  harmless or hedged. From a live call, both of these are violations:
+      "shortcut तो नहीं है, लेकिन जो खाते हैं उसमें कुछ बदलाव sleep को बेहतर बना सकते हैं."
+      "पानी ज़्यादा पीजिए."
+  When they ask for a fix, say plainly that this call is for understanding
+  them, that you have noted it, and return to your question. Naming a lever —
+  food, timing, water, sleep — is already advice, however softly you put it.
+- NEVER PROMISE ANYTHING, especially while closing, when it is most tempting.
+  No plan, no chart, no timeline, no message, no callback, no next step you
+  invent. From a live call, this was a violation:
+      "हम आपका personalized plan बनाएंगे. कल या परसों आपको message आएगा."
+  You do not know what happens next and cannot commit the team to anything.
+  Close warmly and stop: thank them, say the team will be in touch, nothing more.
 - Never promise anything — no diet charts, meal plans, workout plans, follow-up calls, or features.
 - No medical advice or diagnosis.
 - Never re-ask anything from the USER PROFILE — you already have it.
@@ -656,11 +669,26 @@ user. Return JSON only:
 {
   "useful": true|false,
   "off_topic": true|false,
+  "trigger": null|"MEDICAL"|"PRICING"|"DEFLECT"|"WHAT_NEXT"|"MIRA_IDENTITY"|"SENSITIVE",
   "extracted": {"<schema path>": "<value>"},
   "status": "COMPLETE"|"INCOMPLETE",
   "missing": ["<what is still needed, plain words>"]
 }
 
+trigger   — null, or ONE of: MEDICAL, PRICING, DEFLECT, WHAT_NEXT,
+            MIRA_IDENTITY, SENSITIVE. Set it whenever the turn belongs to
+            that category, WHETHER OR NOT it looks like a question.
+            MEDICAL       any health event, condition, diagnosis, symptom,
+                          medication or hospital visit the user reports about
+                          themselves. "मुझे heart attack आया था" is MEDICAL.
+                          So is a stray mention inside a longer answer.
+            DEFLECT       asking what to eat, for a plan, a tip, a shortcut,
+                          or any "what should I do" about food or health.
+            PRICING       cost, fees, plans, what is free, what is paid.
+            WHAT_NEXT     what happens after this call.
+            MIRA_IDENTITY whether you are human, AI, a bot.
+            SENSITIVE     shame, body image, what people will think.
+            When unsure between null and MEDICAL, choose MEDICAL.
 useful    — did this turn add ANY real information toward the goal?
             "हम्म", "पता नहीं", "अच्छा", silence, or an unclear/garbled
             transcript are NOT useful. A partial answer IS useful.
@@ -679,8 +707,8 @@ Output JSON only."""
 
 async def check_node_complete(node_name, goal, paths, extracted, user_text, mira_last=""):
     """Return a completion decision for this turn. Never raises."""
-    fallback = {"useful": False, "off_topic": False, "extracted": {},
-                "status": "INCOMPLETE", "missing": []}
+    fallback = {"useful": False, "off_topic": False, "trigger": None,
+                "extracted": {}, "status": "INCOMPLETE", "missing": []}
     if not goal or not user_text.strip():
         return fallback
     try:
@@ -727,9 +755,13 @@ async def check_node_complete(node_name, goal, paths, extracted, user_text, mira
     for key, val in (data.get("extracted") or {}).items():
         if key in memory_facts.SCHEMA and str(val).strip():
             ex[key] = val
+    trig = str(data.get("trigger") or "").strip().upper() or None
+    if trig not in {t["name"] for t in GLOBAL_TRIGGERS}:
+        trig = None
     return {
         "useful": bool(data.get("useful")),
         "off_topic": bool(data.get("off_topic")),
+        "trigger": trig,
         "extracted": ex,
         "status": "COMPLETE" if str(data.get("status", "")).upper() == "COMPLETE"
                   else "INCOMPLETE",
@@ -750,6 +782,22 @@ def node_is_covered(node_name, extracted):
     need = spec.get("min_paths", max(1, len(paths) // 2))
     have = sum(1 for p in paths if str((extracted or {}).get(p, "")).strip())
     return have >= need
+
+
+def trigger_response(name: str) -> str | None:
+    """The fixed response for a trigger category, by name.
+
+    Used by the SEMANTIC backstop: the regex in check_global_trigger() is a
+    fast path for phrasings we anticipated, and it misses the ones we did not.
+    On the 2026-08-31 call it missed "मुझे heart attack आया था" -- the most
+    serious disclosure a caller can make -- because the patterns look for
+    "diagnosed with", "doctor ne bola" and numeric readings. It also missed
+    "paid plan कितने का है", so Mira improvised her own pricing answer.
+    """
+    for t in GLOBAL_TRIGGERS:
+        if t["name"] == name:
+            return t["response"]
+    return None
 
 
 def check_global_trigger(text: str) -> str | None:
@@ -1053,8 +1101,28 @@ def create_node_processor(context, profile: dict, log_fn=None):
                 self._log(f"extracted {list(decision['extracted'])} "
                           f"(total {len(self._extracted)})")
 
+            # SEMANTIC BACKSTOP. The regex above is a fast path for
+            # phrasings we anticipated; it misses the ones we did not. On the
+            # 2026-08-31 call it missed "मुझे heart attack आया था" entirely and
+            # Mira simply carried on asking about motivation. It also missed
+            # "paid plan कितने का है", so she invented her own pricing answer
+            # ("वो बाद में बताते हैं"), which is both off-script and a promise.
+            #
+            # The turn checker already runs an LLM call every turn, so judging
+            # the category there costs no extra round trip -- and unlike a
+            # pattern list it generalises to phrasings nobody wrote down.
             hint = ""
-            if decision["off_topic"]:
+            if decision.get("trigger"):
+                scripted = trigger_response(decision["trigger"])
+                if scripted:
+                    self._log(f"semantic trigger {decision['trigger']} "
+                              f"node={self._current_node} (regex missed it)")
+                    self._turn_count -= 1
+                    hint = global_trigger_hint(scripted)
+
+            if hint:
+                pass
+            elif decision["off_topic"]:
                 # QUICK-style escape: answer it, then come back. The turn does
                 # not count against the node and no state is lost.
                 self._turn_count -= 1
