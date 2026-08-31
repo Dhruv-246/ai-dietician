@@ -263,6 +263,39 @@ def test_echo_guard():
        echo_guard.is_echo("हाँ बिल्कुल", "और work क्या करते हैं आप?") is False)
 
 
+# ------------------------------------------------------- volunteered facts --
+def test_capture_is_not_node_scoped():
+    """A fact given early must be kept, not thrown away.
+
+    On the 2026-08-30 call the user volunteered lunch time, breakfast, dinner
+    time and evening chai while the machine was still in PROBLEM. The checker
+    was shown only PROBLEM's paths, so it emitted none of them: `extracted`
+    logged one fact across the whole window, PROBLEM ran 22 turns waiting for
+    information that had already been given, and DAILY_EATING then re-asked it.
+    """
+    import inspect
+    src = inspect.getsource(on.check_node_complete)
+    ck("the checker offers the WHOLE schema for capture",
+       "sorted(_mf.SCHEMA)" in src)
+    ck("capture and node-completion are separated in the prompt",
+       "PATHS YOU MAY CAPTURE" in src and "WHAT THIS NODE STILL NEEDS" in src)
+    ck("only the node's own paths drive status/missing",
+       "decide" in src and "`status` and `missing`" in src)
+
+    # The code filter always accepted any schema path -- only the prompt was
+    # narrow. If that filter ever narrows to the node, the bug returns.
+    ck("the code filter still accepts any valid schema path",
+       "if key in memory_facts.SCHEMA" in src)
+
+
+def test_register_and_banned_words():
+    g = on.GLOBAL_RULES
+    ck("आप-form must hold for the whole call", "WHOLE call" in g)
+    ck("तुम-form endings are named explicitly", "करते हो" in g)
+    ck("समझी is banned everywhere, not just as an opener",
+       "not as an opener, not anywhere" in g)
+
+
 # --------------------------------------------------------------- detours --
 def test_offtopic_bridge():
     """Coming back from a detour must sound like a person, not a form.
@@ -415,7 +448,9 @@ def test_prompt_invariants():
     ck("vague questions are called out with a concrete fix",
        "ASK ABOUT THE THING, NOT AROUND IT" in g)
     ck("one question per reply still enforced in prose", "ONE question per reply" in g)
-    ck("समझी opener still banned", "समझी" in g and "NEVER open a reply" in g)
+    # The rule was widened from "never OPEN with समझी" to "never say it at
+    # all" after it appeared mid-reply twice on a live call.
+    ck("समझी banned outright", "समझी" in g and "NEVER say" in g)
 
     # The vague opener was a hardcoded string in the node prompt, so no amount
     # of rule-writing elsewhere could override it.
@@ -469,7 +504,8 @@ def test_bedrock_falls_back():
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
                test_rag_gate, test_onboarding, test_echo_guard,
-               test_global_rules_not_duplicated, test_offtopic_bridge,
+               test_global_rules_not_duplicated, test_capture_is_not_node_scoped,
+               test_register_and_banned_words, test_offtopic_bridge,
                test_reply_shape,
                test_prompt_invariants,
                test_bedrock_falls_back):

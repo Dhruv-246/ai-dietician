@@ -93,7 +93,11 @@ thank you, problem, focus, plan, time, water, tea, coffee, doctor, test, medicin
 Never use these Hindi words — say the English instead: आहार (diet), पोषण (nutrition), \
 स्वास्थ्य (health), व्यायाम (exercise/gym), जल (water), ऊर्जा (energy), संतुलित (balanced), भोजन (breakfast/lunch/dinner).
 
-Use "आप" (formal). Warm, unhurried, like a person — not a form.
+Use "आप" (formal) — and keep it for the WHOLE call. Verb endings must stay
+आप-form: "करते हैं", "खाते हैं", "रहते हैं". Never slide into तुम-form
+"करते हो", "खाते हो", "लेते हो" — a live call started formal and drifted
+mid-conversation, which sounds like two different people talking.
+Warm, unhurried, like a person — not a form.
 
 ## RULE ZERO — EVERY WORD YOU WRITE IS SPOKEN ALOUD BY A VOICE
 
@@ -163,7 +167,10 @@ someone's ear.
 - MOST TURNS NEED NO ACKNOWLEDGEMENT AT ALL. Just ask the next thing. When one
   genuinely helps, keep it to a single word and never use the same one twice in
   a row: "अच्छा", "ठीक", "ओके", "बढ़िया", "हम्म", "चलिए", "सही बात है".
-- NEVER open a reply with "समझी" / "समझ गई" / "समझा". It is the single most repetitive-sounding habit on a call.
+- NEVER say "समझी" / "समझ गई" / "समझा" — not as an opener, not anywhere in
+  the reply. It is the single most repetitive-sounding habit on a call, and it
+  slipped through twice on 2026-08-30 ("जी, समझी!" and "समझी."). If you want to
+  acknowledge, use a different word or, better, none at all.
 - ASK ABOUT THE THING, NOT AROUND IT. A vague question gets a vague answer and
   costs a whole turn to repair. Name what you actually want to know.
       WRONG: "सुबह उठके सबसे पहले क्या होता है?"   (asks about their morning)
@@ -685,9 +692,28 @@ async def check_node_complete(node_name, goal, paths, extracted, user_text, mira
             "mira_last_said": str(mira_last)[:200],
             "user_said": user_text,
         }
-        allowed = "\n".join(f"  {p}" for p in paths) or "  (none — this node captures nothing)"
+        # CAPTURE EVERYTHING, JUDGE ON THIS NODE.
+        #
+        # This used to list only the current node's paths, so a fact stated
+        # early was thrown away: on the 2026-08-30 call the user gave lunch
+        # time, breakfast, dinner time and evening chai while the machine was
+        # still in PROBLEM, and `extracted` recorded exactly one fact. PROBLEM
+        # then ran 22 turns because nothing it asked for was arriving, and
+        # DAILY_EATING re-asked what had already been answered.
+        #
+        # The code filter below always accepted any schema path -- only the
+        # prompt was narrow. So show the whole schema as capturable, and keep
+        # the node's own paths as the separate thing that drives status.
+        import memory_facts as _mf
+        capturable = "\n".join(f"  {pth}" for pth in sorted(_mf.SCHEMA))
+        needed = "\n".join(f"  {pth}" for pth in paths) or "  (none — this node captures nothing)"
         data = await llm_client.complete_json(
-            _CHECK_SYSTEM + "\n\nALLOWED PATHS\n" + allowed,
+            _CHECK_SYSTEM
+            + "\n\nPATHS YOU MAY CAPTURE — any of these, whenever the user states\n"
+              "it, even if this node is not asking about it. A fact volunteered\n"
+              "early must never be discarded.\n" + capturable
+            + "\n\nWHAT THIS NODE STILL NEEDS — these, and only these, decide\n"
+              "`status` and `missing`.\n" + needed,
             json.dumps(payload, ensure_ascii=False),
             kind="fast", max_tokens=500, temperature=0.1,
             timeout=_CHECK_TIMEOUT, groq_model=_CHECK_MODEL)
