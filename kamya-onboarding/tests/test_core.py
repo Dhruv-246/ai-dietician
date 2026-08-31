@@ -263,6 +263,43 @@ def test_echo_guard():
        echo_guard.is_echo("हाँ बिल्कुल", "और work क्या करते हैं आप?") is False)
 
 
+# --------------------------------------------------------------- detours --
+def test_offtopic_bridge():
+    """Coming back from a detour must sound like a person, not a form.
+
+    The old instruction said "answer briefly, then return to what you were
+    asking" and the model obeyed literally: "चार होता है! और lunch में generally
+    क्या खाते हैं?" -- an answer welded to a hard pivot. Nothing asked for a
+    bridge, so there wasn't one.
+    """
+    h = on.OFF_TOPIC_HINT
+    ck("the aside hint demands a BRIDGE beat", "BRIDGE" in h)
+    ck("the bridge is not presented as optional", "NOT optional" in h)
+    ck("a hard pivot is shown as the BAD example",
+       'BAD:' in h and "hard pivot" in h)
+    ck("at least three worked examples of a good bridge",
+       h.count("GOOD:") >= 3, h.count("GOOD:"))
+    ck("the bridge must vary between turns", "Vary the bridge" in h)
+    ck("it still forbids losing the thread", "lose your place" in h)
+    ck("and still asks for ONE short reply", "ONE short reply" in h)
+
+    # A scripted trigger response is a compliance property: medical, pricing
+    # and identity answers must be word-for-word the same every time. The
+    # bridge wraps that wording; it never gets to rewrite it.
+    fixed = "इसके बारे में Kamya team आपको detail में बताएगी."
+    g = on.global_trigger_hint(fixed)
+    ck("the scripted response survives verbatim", fixed in g)
+    ck("it is marked as not paraphrasable", "must not" in g and "paraphrased" in g)
+    ck("the trigger path bridges too", "BRIDGE" in g)
+    ck("the trigger path still bans other advice", "no other advice" in g)
+
+    # Both paths are injected per turn, NOT carried in GLOBAL_RULES -- they
+    # would otherwise cost ~250 tokens on every turn to serve the few that
+    # actually take a detour.
+    ck("the aside hint is not baked into GLOBAL_RULES",
+       "BRIDGE" not in on.GLOBAL_RULES)
+
+
 # ------------------------------------------------------------ prompt size --
 def test_global_rules_not_duplicated():
     """GLOBAL_RULES must appear exactly ONCE, and must still be LAST.
@@ -432,7 +469,8 @@ def test_bedrock_falls_back():
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
                test_rag_gate, test_onboarding, test_echo_guard,
-               test_global_rules_not_duplicated, test_reply_shape,
+               test_global_rules_not_duplicated, test_offtopic_bridge,
+               test_reply_shape,
                test_prompt_invariants,
                test_bedrock_falls_back):
         fn()

@@ -21,6 +21,63 @@ import re
 # Global rules — appended to EVERY node's prompt so Mira's personality and     #
 # constraints stay consistent across the entire call.                          #
 # --------------------------------------------------------------------------- #
+# ------------------------------------------------------------------------- #
+# Returning from a detour.                                                  #
+#                                                                           #
+# The old instruction said "answer briefly, then return to what you were"   #
+# asking, and the model did exactly that -- literally. A live call gave      #
+#     "चार होता है! और lunch में generally क्या खाते हैं?"                        #
+# an answer welded to a hard pivot. It reads like a form resuming rather     #
+# than a person talking. Nothing told her to BRIDGE, so she did not.         #
+#                                                                            #
+# These sit at module level so tests can assert on them, and are injected    #
+# per turn rather than carried in GLOBAL_RULES -- so they cost tokens only   #
+# on the turns that actually take a detour.                                  #
+# ------------------------------------------------------------------------- #
+
+OFF_TOPIC_HINT = (
+    "\n\nThe user just asked their own unrelated question instead "
+    "of answering. Handle it in ONE short reply, in three beats:\n"
+    "  1. ANSWER it — one clause, warm, no elaboration.\n"
+    "  2. BRIDGE back with a short connective phrase, so returning "
+    "feels like a conversation continuing and not a form resuming. "
+    "This beat is NOT optional. Never jump straight from your "
+    "answer into the next question.\n"
+    "  3. ASK your question again, in fresh words.\n"
+    "GOOD: \"चार होता है! खैर, वापस आते हैं — सुबह breakfast में क्या लेते हैं?\"\n"
+    "GOOD: \"हाहा, ज़रूर लीजिए! तो हम आपके खाने की बात कर रहे थे — lunch कितने बजे?\"\n"
+    "GOOD: \"अच्छा सवाल है! वैसे मैं पूछ रही थी — रात को dinner में क्या होता है?\"\n"
+    "BAD:  \"चार होता है! और lunch में generally क्या खाते हैं?\"  "
+    "— answer then a hard pivot. This is what sounds robotic.\n"
+    "Vary the bridge every time. Do not reuse one you have already "
+    "used in this call. Keep the whole reply short — the bridge is "
+    "a few words, not a sentence.\n"
+    "Do not restart the topic or lose your place.\n")
+
+
+def global_trigger_hint(response: str) -> str:
+    """Same bridge rule, but the scripted response must survive verbatim.
+
+    The six global triggers exist because medical, pricing and identity
+    questions need the SAME answer every time -- a compliance property, not
+    a style choice. So the bridge wraps the fixed wording; it never gets to
+    rephrase it.
+    """
+    return (
+    "\n\nIMPORTANT: The user just asked something you must handle "
+    f"with this EXACT response first: \"{response}\"\n"
+    "Say it exactly as written — the wording is fixed and must not "
+    "be paraphrased. Then BRIDGE back to what you were asking with "
+    "a short connective phrase, so it flows as one reply rather "
+    "than two stuck together. Never go straight from the fixed "
+    "response into your question.\n"
+    "GOOD: \"…अगले step में इस पर बात होगी. चलिए, वापस आते हैं — "
+    "lunch कितने बजे होता है?\"\n"
+    "BAD:  \"…अगले step में इस पर बात होगी. lunch कितने बजे होता है?\"\n"
+    "Vary the bridge; do not reuse one from earlier in this call. "
+    "Give no other advice.\n")
+
+
 GLOBAL_RULES = """\
 
 ## LANGUAGE — every single reply must be Hinglish (non-negotiable)
@@ -934,7 +991,7 @@ def create_node_processor(context, profile: dict, log_fn=None):
                 # continue so the LLM can incorporate what the user said.
                 # The global response will be the LLM's "hint" for this turn.
                 # We prepend it to the node prompt temporarily.
-                hint = f"\n\nIMPORTANT: The user just asked something that you should handle with this exact response first: \"{global_response}\"\nSay this EXACTLY, then continue naturally with your current task. Do not give any other advice.\n"
+                hint = global_trigger_hint(global_response)
                 msgs = self._context.get_messages()
                 if msgs:
                     # include_rules=False: GLOBAL_RULES is appended once,
@@ -975,9 +1032,7 @@ def create_node_processor(context, profile: dict, log_fn=None):
                 # QUICK-style escape: answer it, then come back. The turn does
                 # not count against the node and no state is lost.
                 self._turn_count -= 1
-                hint = ("\n\nThe user just asked their own unrelated question. "
-                        "Answer it briefly and warmly in one line, then return to "
-                        "what you were asking. Do not restart or lose your place.\n")
+                hint = OFF_TOPIC_HINT
                 self._log(f"off-topic aside node={self._current_node} (turn not counted)")
             elif not decision["useful"]:
                 # "हम्म", silence, garbled speech. Don't count it, and don't
