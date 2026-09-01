@@ -63,15 +63,28 @@ phrased. A pattern list only catches wordings someone thought of in advance;
 you are the layer that catches the rest.
   EMERGENCY      happening RIGHT NOW and needs help immediately: chest pain,
                  cannot breathe, fainting, heavy bleeding, self-harm.
-  MEDICAL        any condition, diagnosis, symptom, medication, test result
-                 or procedure the user reports about themselves. "mujhe
-                 thyroid hai", "BP ki problem hai", "depression ki medicine
-                 leta hoon", "doctor ne operation bola" are ALL medical.
-                 A condition needs no number and no doctor mentioned.
+  MEDICAL        things a DOCTOR owns, not a dietician: a NAMED diagnosis or
+                 condition, a medication, a test result, a procedure.
+                 YES: "mujhe thyroid hai", "BP ki problem hai", "depression ki
+                      medicine leta hoon", "doctor ne operation bola",
+                      "sugar 180 rehta hai"
+
+                 NOT MEDICAL -- these are a dietician's ordinary work and
+                 Mira must ENGAGE with them, never hand them to a doctor:
+                      poor sleep, low energy, tiredness, bloating, gas,
+                      constipation, acidity, cravings, appetite, weight,
+                      "kuch acha nahi lag raha", feeling off.
+                 A vague complaint is NOT a diagnosis. "sleep acchi nahi ho
+                 rahi" is the single most normal thing a client says, and
+                 answering it with "apne doctor se poochhiye" is a failure --
+                 it is exactly what she is FOR.
   PRICING        cost, fees, plans, what is free or paid.
   MIRA_IDENTITY  whether you are human, AI, a bot.
   SENSITIVE      shame, body image, what people will think.
-When unsure between null and MEDICAL, choose MEDICAL.
+
+Default to null. Only set MEDICAL when a real diagnosis, medication, test
+result or procedure is NAMED, or when it is a genuine EMERGENCY. Over-firing
+makes Mira useless; the deferral is for what she genuinely must not touch.
 
 EXTRACTED rules:
   - Use ONLY paths from the list below. Never invent one.
@@ -382,21 +395,31 @@ async def handle_turn(session, user_text: str, user_context: str,
     for line in out.get("trace", []):
         log(f"  chat graph: {line}")
 
-    # 3. Safety short-circuits. No model call, no chance to improvise.
-    #    The graph's regex runs first; the semantic read backs it up for the
-    #    phrasings no pattern list anticipated.
-    if not out.get("safety_hit") and read.get("trigger"):
-        import onboarding_nodes
-        scripted = onboarding_nodes.trigger_response(read["trigger"])
-        if scripted and read["trigger"] in p3_graph.P3_HARD_TRIGGERS:
-            log(f"chat SEMANTIC trigger {read['trigger']} (regex missed it)")
-            out["safety_hit"] = scripted
-
+    # 3. Safety. Two different behaviours, because they are different risks.
+    #
+    #    EMERGENCY stops everything: fixed line, no model call, no follow-up
+    #    question. Someone describing chest pain must not be asked what they
+    #    had for lunch.
+    #
+    #    Everything else says its fixed line and then CARRIES ON. A live
+    #    thread showed why: three replies in a row were "apne doctor se
+    #    poochhiye" and the user wrote "aap batao kuch". A dead stop on every
+    #    health-adjacent word makes her useless -- the deferral is meant to
+    #    protect what she must not touch, not to end the conversation.
+    import onboarding_nodes
+    hard = None
     if out.get("safety_hit"):
-        reply = out["safety_hit"]
-        session.add("assistant", reply)
-        log(f"chat SAFETY hit -- fixed reply, no LLM")
-        return {"bubbles": [reply], "safety": True,
+        hard = out["safety_hit"]
+    elif read.get("trigger") in p3_graph.P3_HARD_TRIGGERS:
+        hard = onboarding_nodes.trigger_response(read["trigger"])
+        if hard:
+            log(f"chat SEMANTIC trigger {read['trigger']} (regex missed it)")
+
+    is_emergency = bool(hard) and "112" in hard
+    if hard and is_emergency:
+        session.add("assistant", hard)
+        log("chat EMERGENCY -- fixed reply, no LLM, conversation stops")
+        return {"bubbles": [hard], "safety": True,
                 "stage": None, "lane": "SAFETY"}
 
     session.threads = out.get("threads", session.threads)
@@ -405,6 +428,20 @@ async def handle_turn(session, user_text: str, user_context: str,
     ref = rag.format_reference(retrieved) if retrieved else ""
 
     directive = out.get("directive") or ""
+    if hard:
+        # Say the fixed wording, then keep going. The wording is fixed for
+        # compliance reasons and must not be paraphrased; the turn after it
+        # is ordinary conversation.
+        directive = (
+            f'Begin your reply with EXACTLY this sentence, word for word: '
+            f'"{hard}"\n'
+            "Then continue naturally with whatever you CAN help with — food, "
+            "timing, habits, routine. Do not add medical guidance of your own "
+            "and do not interpret any test result, but do not end the "
+            "conversation either. Ask one useful thing, or offer what you can "
+            "actually do.\n\n" + directive)
+        log(f"chat trigger {read.get('trigger') or 'regex'} -- scripted line + continue")
+
     budget = out.get("budget") or BUDGETS["explain"]
     if not out.get("may_advise"):
         directive += ("\n\nYou do NOT have enough about this yet to advise. "

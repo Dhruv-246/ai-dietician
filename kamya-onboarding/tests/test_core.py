@@ -384,14 +384,20 @@ def test_chat_has_a_semantic_safety_backstop():
     import inspect
     src = inspect.getsource(chat_engine)
     ck("chat asks the model for a trigger category", '"trigger": null|' in src)
-    ck("a condition needs no number to count as medical",
-       "needs no number" in src)
-    ck("ambiguity resolves toward MEDICAL",
-       "When unsure between null and MEDICAL, choose MEDICAL" in src)
+    # A NAMED condition still counts even with no number and no doctor
+    # mentioned -- that was the thyroid miss.
+    ck("a named condition is medical without a number",
+       '"mujhe thyroid hai"' in src and '"BP ki problem hai"' in src)
+    # Deliberately REVERSED. "When unsure choose MEDICAL" made her defer on
+    # "sleep acchi nahi ho rahi" three times in a row.
+    ck("ambiguity no longer resolves toward MEDICAL",
+       "When unsure between null and MEDICAL, choose MEDICAL" not in src
+       and "Default to null" in src)
     ck("a semantic hit still yields the SCRIPTED response",
        "trigger_response(read[" in src)
-    ck("the backstop only fires when the regex did not",
-       'not out.get("safety_hit") and read.get("trigger")' in src)
+    ck("the regex result takes precedence over the semantic read",
+       'if out.get("safety_hit")' in src
+       and 'elif read.get("trigger") in p3_graph.P3_HARD_TRIGGERS' in src)
     ck("it is logged so a regex gap is visible",
        "regex missed it" in src)
 
@@ -400,6 +406,43 @@ def test_chat_has_a_semantic_safety_backstop():
     import p3_graph
     ck("DEFLECT is not a P-3 trigger", "DEFLECT" not in p3_graph.P3_HARD_TRIGGERS)
     ck("EMERGENCY is hard in P-3", "EMERGENCY" in p3_graph.P3_HARD_TRIGGERS)
+
+
+def test_medical_boundary_is_doctor_owned_not_everyday():
+    """Over-firing makes Mira useless. Under-firing is unsafe. Both are bugs.
+
+    Live thread: "sleep acchi nahi ho rahi h" produced the doctor deferral,
+    three in a row, until the user wrote "aap batao kuch". Poor sleep is the
+    single most ordinary thing a client says and is exactly what a dietician
+    is for.
+    """
+    import inspect
+    src = inspect.getsource(chat_engine)
+
+    ck("MEDICAL is defined as what a DOCTOR owns", "things a DOCTOR owns" in src)
+    ck("everyday complaints are named as NOT medical", "NOT MEDICAL" in src)
+    for everyday in ("poor sleep", "low energy", "bloating", "cravings"):
+        ck(f"named as a dietician's own work: {everyday}", everyday in src)
+    ck("the failing sentence is quoted as the example",
+       "sleep acchi nahi ho" in src)
+    ck("the bias now defaults to NOT firing", "Default to null" in src)
+    ck("the old over-firing rule is gone",
+       "When unsure between null and MEDICAL, choose MEDICAL" not in src)
+
+    # A deferral must not end the conversation -- except for an emergency.
+    ck("only an emergency hard-stops", "is_emergency" in src)
+    ck("other triggers say their line and continue",
+       "Then continue naturally with whatever you CAN help with" in src)
+    ck("the fixed wording is still verbatim",
+       "EXACTLY this sentence, word for word" in src)
+
+    import pathlib
+    txt = pathlib.Path(chat_engine.__file__).with_name("chat_prompt.md").read_text(encoding="utf-8")
+    ck("the prompt tells her to carry the thread", "Carry the conversation" in txt)
+    ck("a vague complaint is framed as an invitation",
+       "invitation, not a problem" in txt)
+    ck("repeating a deflection is banned",
+       "Never repeat the same deflection twice" in txt)
 
 
 def test_chat_survives_a_restart():
@@ -863,6 +906,7 @@ def main():
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
                test_chat_has_a_semantic_safety_backstop,
+               test_medical_boundary_is_doctor_owned_not_everyday,
                test_chat_survives_a_restart,
                test_chat_ui_queues_instead_of_dropping,
                test_chat_bubble_edges, test_emergency_outranks_medical,
