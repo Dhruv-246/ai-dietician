@@ -666,8 +666,34 @@ def quick_directive(situation="", active=None, explicit_advice_request=False):
              "Do NOT defend or explain what you said before. Then carry on.")
     elif situation == "MEMORY_QUERY":
         d = "Answer from what you remember about this user. Be specific."
+    elif situation in ("SOCIAL", "AMBIGUOUS"):
+        # JUST TALK. No case existed for this, so a social turn fell through to
+        # the default and then collected "steer back to what you were
+        # discussing" -- which is why "aap batao" and "aap kaise ho" both came
+        # back as questions about today's food, and "aapse kuch baat karni thi"
+        # came back as a menu: "weakness, digestion, ya sleep?"
+        #
+        # Nobody talks like that. A friend who is also your dietician does not
+        # convert every hello into an intake question. The thread can wait --
+        # it is not going anywhere.
+        d = ("They are being social, or opening a conversation without saying "
+             "what about yet. Just talk. Reply like a person would: answer "
+             "what they asked, or make room for what they want to say.\n"
+             "Do NOT bring up their problem, their food, their sleep or "
+             "anything you remember, unless THEY raise it. Do NOT offer a list "
+             "of topics to choose from. Do NOT ask a data question.\n"
+             'GOOD, to "aap kaise ho": "Main theek hoon 🙂 Aap sunao."\n'
+             'GOOD, to "aapse baat karni thi": "Haan bolo, kya hua?"\n'
+             'BAD: "Main theek hoon. Aapka aaj ka khana kaisa tha?"\n'
+             'BAD: "Aapko kya discuss karna hai — weakness, digestion, ya sleep?"')
 
-    if gated:
+    # A social turn is never "gated" into steering back. The gate exists to stop
+    # PREMATURE ADVICE, not to stop ordinary conversation, and applying it to a
+    # hello is what made her sound like a form.
+    if gated and situation in ("SOCIAL", "AMBIGUOUS"):
+        d += (" Do not give advice about their open problem in this turn — but "
+              "do not drag the conversation back to it either. Let them lead.")
+    elif gated:
         d += (f" IMPORTANT: you are in the middle of understanding their '{active.topic}' "
               "problem and do not yet know enough to advise on it. Answer only what "
               "they just asked. Do NOT add tips, plans or recommendations about "

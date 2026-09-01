@@ -731,6 +731,46 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
        "Never repeat the same deflection twice" in txt)
 
 
+def test_social_turns_are_not_steered_back():
+    """A hello must not be converted into an intake question.
+
+    Compared against a competitor on 2026-09-02:
+        them: "aap kaise ho"  -> "Main theek hoon Dhruv, tum apna dhyaan rakho"
+        us:   "aap kaise ho"  -> "Main theek hoon. Aapka aaj ka khana kaisa tha?"
+        us:   "aapse baat karni thi" -> "kya discuss karna hai — weakness,
+                                         digestion, ya sleep?"
+
+    quick_directive had cases for OFF_TOPIC, CORRECTION and MEMORY_QUERY but
+    NONE for SOCIAL, so a social turn fell through to the default and then
+    collected "steer back to what you were discussing". That one line is why
+    every friendly message came back pointing at food.
+    """
+    import thread_machine as tm
+    th = tm.Thread(topic="weakness", stage=tm.S_GATHER)
+
+    for sit in ("SOCIAL", "AMBIGUOUS"):
+        d = tm.quick_directive(sit, th)["directive"]
+        ck(f"{sit}: told to just talk", "Just talk" in d)
+        ck(f"{sit}: does NOT steer back to the problem",
+           "steer back to what you were discussing" not in d)
+        ck(f"{sit}: must not raise their food or sleep unprompted",
+           "unless THEY raise it" in d)
+        ck(f"{sit}: no menu of topics", "list of topics to choose from" in d)
+        ck(f"{sit}: the competitor-style reply is the GOOD example",
+           "Main theek hoon" in d and "Aap sunao" in d)
+        ck(f"{sit}: the failing reply is the BAD example",
+           "Aapka aaj ka khana kaisa tha" in d)
+        # The advice gate must still hold -- this loosens the AGENDA, never
+        # the rule about advising before understanding.
+        ck(f"{sit}: still may not advise mid-thread",
+           tm.quick_directive(sit, th)["may_advise"] is False)
+
+    # A non-social QUICK turn still steers back, which is correct there.
+    ck("FACTUAL still returns to the thread",
+       "steer back to what you were discussing"
+       in tm.quick_directive("FACTUAL", th)["directive"])
+
+
 def test_conversation_falls_back_like_the_small_jobs_do():
     """A Bedrock outage must not take chat down.
 
@@ -1314,6 +1354,7 @@ def main():
                test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
+               test_social_turns_are_not_steered_back,
                test_conversation_falls_back_like_the_small_jobs_do,
                test_close_session_calls_match_their_signatures,
                test_chat_survives_a_restart,
