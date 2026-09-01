@@ -332,12 +332,15 @@ def test_chat_bubbles_and_budgets():
     ck("a one-liner is a single bubble",
        len(chat_engine.split_bubbles("Haan bilkul.")) == 1)
 
-    b = chat_engine.split_bubbles(
-        "Haan bilkul. Aap kis type ka change chahte ho? Bata dijiye.")
+    # Long enough to be worth splitting -- under ~12 words it deliberately
+    # is not, because two bubbles for four words reads as a stutter.
+    long_reply = ("Haan bilkul, rice kha sakte ho roz. "
+                  "Aap kis type ka change chahte ho abhi? "
+                  "Bata dijiye taaki main plan kar sakoon.")
+    b = chat_engine.split_bubbles(long_reply)
     ck("a multi-sentence reply splits", len(b) > 1, b)
     ck("splitting never loses text",
-       "".join(b).replace(" ", "") ==
-       "Haan bilkul. Aap kis type ka change chahte ho? Bata dijiye.".replace(" ", ""))
+       "".join(b).replace(" ", "") == long_reply.replace(" ", ""))
     ck("bubbles are capped", len(chat_engine.split_bubbles(
         "A. B. C. D. E. F. G. H.")) <= chat_engine.MAX_BUBBLES)
 
@@ -360,6 +363,54 @@ def test_chat_bubbles_and_budgets():
     ck("a plan is unbounded", chat_engine.BUDGETS["plan"] == 0)
 
 
+def test_chat_fact_merge():
+    """A list path must ACCUMULATE. dict.update() silently drops all but the last.
+
+    Live chat run 2026-09-01: the user reported a heart attack, then four
+    messages later a blood sugar reading. Both are health.conditions, which is
+    list-typed. The session ended holding only the sugar figure -- the heart
+    attack was gone, silently, on a health product.
+    """
+    p = chat_engine.merge_facts({}, {"health.conditions": "heart attack last month"})
+    p = chat_engine.merge_facts(p, {"health.conditions": "blood sugar 180"})
+    ck("a second condition does not evict the first",
+       p["health.conditions"] == ["heart attack last month", "blood sugar 180"],
+       p.get("health.conditions"))
+
+    p = chat_engine.merge_facts(p, {"health.conditions": "Heart Attack Last Month"})
+    ck("the same condition in different case is not duplicated",
+       len(p["health.conditions"]) == 2, p["health.conditions"])
+
+    # Scalars must still REPLACE -- a corrected sleep time should not turn
+    # into a list of every answer ever given.
+    q = chat_engine.merge_facts({}, {"lifestyle.sleep_time": "11pm"})
+    q = chat_engine.merge_facts(q, {"lifestyle.sleep_time": "1am"})
+    ck("a scalar is replaced, not accumulated", q["lifestyle.sleep_time"] == "1am")
+    ck("merging returns a new dict rather than mutating",
+       chat_engine.merge_facts({}, {}) == {})
+
+
+def test_chat_bubble_edges():
+    """Two failure modes from the live run, in opposite directions."""
+    # Under-splitting: the model separates paragraphs with a blank line, so
+    # "any newline means keep whole" matched nearly every reply and bubbles
+    # never split at all.
+    two = chat_engine.split_bubbles("Haan, rice theek hai.\n\nKitna khaate ho?")
+    ck("a blank line is a bubble boundary", len(two) == 2, two)
+
+    # Over-splitting: "Of course. No problem." across two bubbles reads as a
+    # stutter, not as thinking.
+    ck("a very short reply stays in one bubble",
+       len(chat_engine.split_bubbles("Of course. No problem.")) == 1)
+
+    # Structure still survives whole -- that is what the guard was always for.
+    for doc in ("Day 1\n- poha\n- dal\nDay 2\n- upma",
+                "1. poha\n2. dal\n3. roti\n4. sabzi",
+                "## Plan\nSome text\nMore text\nAnd more"):
+        ck(f"structured text kept whole: {doc[:14]!r}",
+           len(chat_engine.split_bubbles(doc)) == 1)
+
+
 def test_chat_prompt_is_not_the_voice_prompt():
     """The voice prompt exists partly to drive a TTS engine. Those rules are
     not neutral in chat -- they are wrong."""
@@ -379,6 +430,38 @@ def test_chat_prompt_is_not_the_voice_prompt():
     # Voice-only machinery must NOT have been copied across.
     for banned in ("Devanagari for pronunciation", "NO digits", "spoken aloud"):
         ck(f"voice-only rule absent: {banned!r}", banned not in txt)
+
+    # Mira is a woman. The voice prompt always said so; the chat prompt did
+    # not, and a live run produced "samajh sakta hoon", "kaam kar sakta hoon"
+    # and "samajhta hoon" in one session.
+    ck("chat prompt states she is a woman", "WOMAN" in txt)
+    # A live run produced "Kamya team ke behind mein actual nutritionists
+    # hain" -- a claim about the business she has no way of knowing.
+    ck("inventing facts about Kamya is banned", "Never invent anything about Kamya" in txt)
+    ck("it names the correct feminine forms", "sakti hoon" in txt)
+    ck("it names the masculine forms to avoid", "sakta hoon" in txt)
+
+
+def test_emergency_outranks_medical():
+    """"I have a condition" and "this is happening to me now" need different
+    answers, and the second must not depend on the model choosing to comply."""
+    for text in ("mujhe abhi chest me bahut dard ho raha hai",
+                 "saans nahi aa rahi",
+                 "main behosh ho raha hoon"):
+        r = on.check_global_trigger(text)
+        ck(f"emergency fires on: {text[:34]}", bool(r) and "112" in (r or ""))
+
+    # A past event is MEDICAL, not EMERGENCY -- telling someone whose heart
+    # attack was last month to call an ambulance is its own failure.
+    r = on.check_global_trigger("mera sugar 180 rehta hai")
+    ck("a standing condition is not treated as an emergency",
+       bool(r) and "112" not in (r or ""))
+
+    names = [t["name"] for t in on.GLOBAL_TRIGGERS]
+    ck("EMERGENCY is matched before MEDICAL",
+       names.index("EMERGENCY") < names.index("MEDICAL"), names)
+    ck("the semantic backstop knows the category too",
+       "EMERGENCY" in on._CHECK_SYSTEM)
 
 
 # ------------------------------------------------------------- safety net --
@@ -401,7 +484,8 @@ def test_trigger_backstop():
     # So the checker must be able to name the category semantically...
     import inspect
     chk = inspect.getsource(on)
-    ck("the checker asks for a trigger category", '"trigger": null|"MEDICAL"' in chk)
+    ck("the checker asks for a trigger category", '"trigger": null|' in chk
+       and '"MEDICAL"' in chk)
     ck("a health EVENT counts as MEDICAL, not just a diagnosis",
        "heart attack" in chk and "MEDICAL" in chk)
     ck("ambiguity resolves toward MEDICAL",
@@ -674,7 +758,8 @@ def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
                test_rag_gate, test_onboarding, test_echo_guard,
                test_chat_session_lifecycle, test_chat_session_store,
-               test_chat_bubbles_and_budgets,
+               test_chat_bubbles_and_budgets, test_chat_fact_merge,
+               test_chat_bubble_edges, test_emergency_outranks_medical,
                test_chat_prompt_is_not_the_voice_prompt,
                test_global_rules_not_duplicated, test_trigger_backstop,
                test_no_advice_no_promises, test_capture_is_not_node_scoped,

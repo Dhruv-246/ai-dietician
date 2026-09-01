@@ -72,6 +72,39 @@ ALLOWED PATHS
 """
 
 
+def merge_facts(pending: dict, found: dict) -> dict:
+    """Fold a turn's extraction into the pending buffer.
+
+    NOT dict.update(). Roughly a third of the schema is LIST-typed --
+    health.conditions, preferences.dislikes, health.medications -- and a plain
+    update replaces the list with whatever came last.
+
+    Live chat test, 2026-09-01: the user said "mujhe pichle mahine heart
+    attack aaya tha" and, four messages later, "mera sugar 180 rehta hai".
+    Both landed on health.conditions. The buffer ended the session holding
+    only the sugar reading; the heart attack was gone. Silently, on a health
+    product, for the single most important fact in the conversation.
+
+    Scalars still replace -- a corrected sleep time should not accumulate into
+    a list of every answer the user has ever given.
+    """
+    out = dict(pending)
+    for path, value in (found or {}).items():
+        kind = memory_facts.SCHEMA.get(path)
+        if kind != "list":
+            out[path] = value
+            continue
+        have = out.get(path)
+        items = list(have) if isinstance(have, list) else ([have] if have else [])
+        for v in (value if isinstance(value, list) else [value]):
+            v = str(v).strip()
+            # Case-insensitive dedupe: "PCOS" and "pcos" are one condition.
+            if v and v.lower() not in {str(x).lower() for x in items}:
+                items.append(v)
+        out[path] = items
+    return out
+
+
 async def extract_facts(user_text: str) -> dict:
     """Cheap per-message extraction into the session's pending buffer.
 
@@ -169,6 +202,17 @@ def build_system_prompt(session, user_context: str, directive: str,
 # --------------------------------------------------------- reply shaping --
 _SENT_SPLIT = re.compile(r"(?<=[।.!?])\s+")
 
+# Real structure: bullets, numbered lines, headings, or many short lines. This
+# is what "keep it whole" was always meant to catch -- not a paragraph break.
+_LIST_LINE = re.compile(r"^\s*(?:[-*•]|\d+[.)]|#{1,6}\s|Day\s*\d)", re.I | re.M)
+
+
+def _is_structured(text: str) -> bool:
+    if _LIST_LINE.search(text):
+        return True
+    lines = [l for l in text.split("\n") if l.strip()]
+    return len(lines) >= 4
+
 
 def split_bubbles(text: str, max_bubbles: int = MAX_BUBBLES):
     """One 60-word paragraph reads as a form letter; the same words in two or
@@ -181,8 +225,29 @@ def split_bubbles(text: str, max_bubbles: int = MAX_BUBBLES):
     text = (text or "").strip()
     if not text:
         return []
-    if "\n" in text or len(text) > 600:          # structured / long: keep whole
+
+    # A DOCUMENT stays whole -- chopping a plan destroys the structure that
+    # makes it readable. But "has a newline" is the wrong test for that: the
+    # model puts a blank line between ordinary paragraphs, so the old guard
+    # matched nearly every reply and bubbles never split at all. Look for
+    # actual structure instead.
+    if _is_structured(text) or len(text) > 900:
         return [text]
+
+    # A blank line IS a natural bubble boundary -- the model has already told
+    # us where the thought breaks. Prefer it to sentence splitting.
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if len(paras) > 1:
+        return paras[:max_bubbles] if len(paras) <= max_bubbles else \
+            paras[:max_bubbles - 1] + [" ".join(paras[max_bubbles - 1:])]
+
+    text = " ".join(text.split())
+
+    # Splitting a very short reply is worse than not splitting it. "Of course.
+    # No problem." across two bubbles reads as a stutter, not as thinking.
+    if len(text.split()) < 12:
+        return [text]
+
     sents = [s.strip() for s in _SENT_SPLIT.split(text) if s.strip()]
     if len(sents) <= 1:
         return [text]
@@ -257,7 +322,8 @@ async def handle_turn(session, user_text: str, user_context: str,
     try:
         found = await extract_facts(user_text)
         if found:
-            session.pending_facts.update(found)
+            # merge_facts, not update: a list path must accumulate. See above.
+            session.pending_facts = merge_facts(session.pending_facts, found)
             log(f"chat extracted {list(found)} (pending {len(session.pending_facts)})")
     except Exception as exc:
         log(f"chat extraction failed: {type(exc).__name__}: {exc}")

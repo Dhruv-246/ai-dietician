@@ -570,6 +570,34 @@ NODE_GOALS = {
 
 
 GLOBAL_TRIGGERS = [
+    # FIRST on purpose: it must win any overlap with MEDICAL. "chest me dard"
+    # would otherwise match the medical patterns and get the note-it-and-see-
+    # your-doctor line, which is the wrong answer for something happening NOW.
+    #
+    # Live chat test, 2026-09-01: "chest me bahut dard ho raha hai aur saans
+    # nahi aa rahi" routed as lane=ADVANCE stage=GATHER. The reply happened to
+    # be right because the prompt asks for it -- but a compliance answer that
+    # depends on the model choosing to comply is not a compliance answer.
+    {
+        "name": "EMERGENCY",
+        "patterns": [
+            # \w+\s* between, because real speech is "chest me BAHUT dard"
+            # -- an exact adjacency test missed the very sentence that
+            # motivated this trigger.
+            r"(?:chest|छाती|seene?|सीने)\s*(?:\w+\s+){0,3}(?:dard|दर्द|pain)",
+            r"(?:saans|सांस|साँस|breath)\s*(?:nahi|नहीं|nai|not)",
+            r"(?:behosh|बेहोश|faint|unconscious|collapse)",
+            r"(?:bleeding|खून\s*बह|blood\s*loss)",
+            r"(?:stroke|heart\s*attack)\s*(?:ho\s*raha|हो\s*रहा|happening|abhi|अभी)",
+            r"(?:emergency|इमरजेंसी|ambulance|एम्बुलेंस)",
+            r"(?:jaan|जान)\s*(?:nikal|निकल|ja\s*rahi|जा\s*रही)",
+            r"(?:suicide|खुदकुशी|end\s*my\s*life|marna\s*chahta)",
+        ],
+        "response": ("ये serious लग रहा है. अभी तुरंत medical help लीजिए — "
+                     "डॉक्टर को call कीजिए या nearest hospital जाइए. "
+                     "India में emergency number 112 है."),
+    },
+
     {
         "name": "DEFLECT",
         "patterns": [
@@ -669,7 +697,7 @@ user. Return JSON only:
 {
   "useful": true|false,
   "off_topic": true|false,
-  "trigger": null|"MEDICAL"|"PRICING"|"DEFLECT"|"WHAT_NEXT"|"MIRA_IDENTITY"|"SENSITIVE",
+  "trigger": null|"EMERGENCY"|"MEDICAL"|"PRICING"|"DEFLECT"|"WHAT_NEXT"|"MIRA_IDENTITY"|"SENSITIVE",
   "extracted": {"<schema path>": "<value>"},
   "status": "COMPLETE"|"INCOMPLETE",
   "missing": ["<what is still needed, plain words>"]
@@ -678,6 +706,11 @@ user. Return JSON only:
 trigger   — null, or ONE of: MEDICAL, PRICING, DEFLECT, WHAT_NEXT,
             MIRA_IDENTITY, SENSITIVE. Set it whenever the turn belongs to
             that category, WHETHER OR NOT it looks like a question.
+            EMERGENCY     something happening RIGHT NOW that needs help
+                          immediately: chest pain, cannot breathe, fainting,
+                          heavy bleeding, or talk of self-harm. Outranks
+                          MEDICAL -- MEDICAL is "I have a condition",
+                          EMERGENCY is "this is happening to me now".
             MEDICAL       any health event, condition, diagnosis, symptom,
                           medication or hospital visit the user reports about
                           themselves. "मुझे heart attack आया था" is MEDICAL.

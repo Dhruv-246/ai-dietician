@@ -232,7 +232,9 @@ class ConvState(TypedDict, total=False):
 # SENSITIVE is kept but demoted: answering body-image distress with a canned
 # line is worse than a warm, personal reply, so it steers the LLM instead of
 # replacing it.
-P3_HARD_TRIGGERS = {"MEDICAL", "PRICING", "MIRA_IDENTITY"}
+# EMERGENCY is hard on EVERY surface. It is the one case where stopping
+# the conversation dead is the correct product behaviour.
+P3_HARD_TRIGGERS = {"EMERGENCY", "MEDICAL", "PRICING", "MIRA_IDENTITY"}
 P3_SOFT_TRIGGERS = {"SENSITIVE"}
 
 _SENSITIVE_DIRECTIVE = (
