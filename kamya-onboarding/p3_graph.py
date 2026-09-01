@@ -110,6 +110,19 @@ order and stop at the first that matches.
    "अरे वो छोड़िए, शादी है weight कम करना है"
    Opening a thread when none is active is also SWITCH.
 
+   DO NOT OPEN A THREAD JUST BECAUSE THEY SPOKE. A thread is a piece of work
+   on a STATED problem. Until they say what is wrong, there is nothing to
+   work on, and opening one anyway creates an agenda that then drags every
+   later reply back to it.
+   These are SOCIAL or AMBIGUOUS with lane QUICK, never PROBLEM:
+     "aap batao"                 they are handing the turn back, not reporting
+     "aapse kuch baat karni thi" they are opening a door, not stating a problem
+     "aap kaise ho"              a question about YOU
+     "kuch poochna tha"          still has not said what
+     "hi" / "suno" / "yaar"
+   Wait for the actual complaint. "mujhe weakness ho rahi hai" is a PROBLEM;
+   "mujhe kuch baat karni thi" is not, however much it sounds like a preface.
+
 3. ADVANCE — the turn belongs to the active thread. This is the DEFAULT
    whenever a thread is active and the turn relates to it in any way.
    Includes ALL of these:

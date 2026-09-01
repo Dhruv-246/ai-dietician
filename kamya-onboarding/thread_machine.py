@@ -542,9 +542,26 @@ def stage_directive(thread, gather):
     st = thread.stage
     budget = BUDGET.get(st, 60)
 
-    if st == S_UNDERSTAND:
+    if st == S_UNDERSTAND and not gather["known"] and not thread.slots:
+        d = ("You do not yet know what this is about. Ask ONE short, OPEN "
+             "question -- let them say it in their own words. NEVER offer a "
+             "list of options to choose from.\n"
+             'GOOD: "Kya chal raha hai?"\n'
+             'BAD:  "Kya problem hai — weakness, digestion, ya sleep?"')
+    elif st == S_UNDERSTAND:
         d = ("The user has just raised a problem. Ask ONE short question to understand "
              "it better. Do NOT give any advice, tip or solution yet.")
+    elif st == S_GATHER and not gather["known"] and not thread.slots:
+        # NOTHING KNOWN YET. "Ask about ONE thing: X" needs an X, and with an
+        # empty thread there isn't one -- so the model invents a list. That is
+        # where every menu came from: "weakness, digestion, ya sleep?",
+        # "energy level kaisa hai? (low, normal, high)".
+        d = ("You do not yet know what this is about. Ask ONE short, OPEN "
+             "question and let them describe it in their own words.\n"
+             "NEVER offer a list of options to pick from. A menu is what a "
+             "form does; you are having a conversation.\n"
+             'GOOD: "Kya chal raha hai?"   GOOD: "Batao, kya hua?"\n'
+             'BAD:  "Kya dikkat hai — weakness, digestion, ya neend?"')
     elif st == S_GATHER:
         # ONE question about ONE thing. The previous version said "cover as much
         # as sounds natural", and the model read that as permission to ask four
@@ -632,6 +649,10 @@ def stage_directive(thread, gather):
         d = "Wrap this topic up warmly in one short line."
 
     d += f" Keep it under {budget} words."
+    # EVERY stage. Banning menus per stage just moved them to whichever stage
+    # had least to go on.
+    d += (" Never present the user with a list of options to choose from; ask "
+          "one open question or say one thing, the way a person would.")
     return {"directive": d, "budget": budget,
             "may_advise": st in (S_ADVISE, S_CLOSE)}
 

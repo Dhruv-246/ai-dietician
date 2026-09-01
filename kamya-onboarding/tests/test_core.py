@@ -528,11 +528,22 @@ def test_problem_threads_have_their_own_checklist():
     ck("probes are asked before profile top-ups",
        tm.rank_gaps(g["missing"], t.needed_paths)[0] == "probe.what")
 
-    d = tm.stage_directive(
+    # With NOTHING known the directive asks openly rather than naming a probe
+    # -- probe.what IS "what exactly is happening", so an open question is the
+    # same request phrased like a person, and it is where menus used to appear.
+    d0 = tm.stage_directive(
         tm.Thread(topic="appetite", template="PROBLEM", stage=tm.S_GATHER,
                   adhoc=list(t.adhoc)), g)["directive"]
-    ck("the directive asks it in words, not as a key name",
-       "what exactly is happening" in d and "probe." not in d, d[:90])
+    ck("an empty problem thread asks openly", "OPEN" in d0)
+
+    # Once something IS known, it names the next probe -- in words, never as a
+    # key. "probe.when" would be read aloud as "probe when".
+    answered = tm.Thread(topic="appetite", template="PROBLEM",
+                         stage=tm.S_GATHER, adhoc=list(t.adhoc),
+                         slots={"probe.what": "no appetite"})
+    d1 = tm.stage_directive(answered, tm.plan_gather(answered, {}, {}))["directive"]
+    ck("the next probe is named in words, not as a key name",
+       "which meals or times of day" in d1 and "probe." not in d1, d1[:110])
 
     # The checklist is a FLOOR. Exhausting all six would be an interrogation.
     def at(n):
@@ -729,6 +740,50 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
        "invitation, not a problem" in txt)
     ck("repeating a deflection is banned",
        "Never repeat the same deflection twice" in txt)
+
+
+def test_no_menus_anywhere():
+    """A menu is the most machine-like thing she does, and it kept moving.
+
+    Live, 2026-09-02:
+        "aap batao"                  -> "energy level kaisa hai? (low, normal, high)"
+        "aapse kuch baat krni thi"   -> "weakness, digestion, ya neend?"
+
+    Two causes. The router read a conversational opener as a PROBLEM and
+    opened a thread with nothing known and seven things missing; the GATHER
+    directive then said "ask about ONE thing: X" with no X available, so the
+    model invented a list. Banning menus in one stage only moved them to
+    whichever stage had least to go on.
+    """
+    import thread_machine as tm
+    empty = {"known": {}, "missing": ["a", "b"], "stale": []}
+    known = {"known": {"x": "1"}, "missing": ["a"], "stale": []}
+
+    # The ban is global, not per stage.
+    for st in (tm.S_UNDERSTAND, tm.S_GATHER, tm.S_REFLECT, tm.S_ADVISE,
+               tm.S_CONFIRM, tm.S_CLOSE):
+        for g in (empty, known):
+            d = tm.stage_directive(tm.Thread(topic="t", stage=st), g)["directive"]
+            ck(f"{st} never offers a list", "list of options to choose from" in d)
+
+    # With nothing known, ask OPENLY -- that is where the menus were born.
+    for st in (tm.S_UNDERSTAND, tm.S_GATHER):
+        d = tm.stage_directive(tm.Thread(topic="t", stage=st), empty)["directive"]
+        ck(f"{st} with nothing known asks openly", "OPEN" in d)
+        ck(f"{st} shows the real failing menu as BAD", "weakness, digestion" in d)
+        # ...but a thread that HAS facts still asks about a specific thing.
+        d2 = tm.stage_directive(tm.Thread(topic="t", stage=st), known)["directive"]
+        ck(f"{st} with facts still targets one thing", "OPEN" not in d2)
+
+    # And the router must stop reading an opener as a complaint.
+    import p3_graph, inspect
+    r = inspect.getsource(p3_graph)
+    ck("the router is told a thread needs a STATED problem",
+       "DO NOT OPEN A THREAD JUST BECAUSE THEY SPOKE" in r)
+    for opener in ("aap batao", "aapse kuch baat karni thi", "aap kaise ho"):
+        ck(f"named as not-a-problem: {opener!r}", opener in r)
+    ck("and the distinction is spelled out",
+       "is a PROBLEM" in r and "is not, however much it sounds like a preface" in r)
 
 
 def test_social_turns_are_not_steered_back():
@@ -1354,6 +1409,7 @@ def main():
                test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
+               test_no_menus_anywhere,
                test_social_turns_are_not_steered_back,
                test_conversation_falls_back_like_the_small_jobs_do,
                test_close_session_calls_match_their_signatures,
