@@ -408,6 +408,50 @@ def test_chat_has_a_semantic_safety_backstop():
     ck("EMERGENCY is hard in P-3", "EMERGENCY" in p3_graph.P3_HARD_TRIGGERS)
 
 
+def test_small_talk_gets_small_talk():
+    """"hi" must not be answered with an agenda.
+
+    Live thread: "hi" came back as "Hey Ansh! Kaise ho? Kuch naya hua is week
+    mein — sleep, digestion, ya khana — jo discuss karein?" That is a menu.
+    Nobody opens a conversation by reading out options.
+
+    Three causes, two of them self-inflicted: the seeded greeting was itself a
+    menu and the model copied its shape; "if a reply could end the
+    conversation, it is the wrong reply" made every reply carry an agenda; and
+    a greeting was handed a 30-word budget, which is room to pad.
+    """
+    for t in ("hi", "Hey!", "namaste", "ok", "hmm", "thanks", "good morning",
+              "haan", "bye"):
+        ck(f"small talk detected: {t!r}", chat_engine.is_small_talk(t))
+    # A greeting with a real message attached is NOT small talk.
+    for t in ("hi mira mujhe ek problem hai", "mera dinner theek hai kya",
+              "sleep acchi nahi"):
+        ck(f"a real message is not small talk: {t[:26]!r}",
+           not chat_engine.is_small_talk(t))
+
+    import inspect
+    src = inspect.getsource(chat_engine)
+    ck("small talk is capped at the ack budget", 'budget = BUDGETS["ack"]' in src)
+    ck("and told explicitly not to offer topics", "Do NOT offer topics" in src)
+    ck("the failing reply is quoted as the BAD example",
+       "Kuch naya hua is week" in src)
+
+    import pathlib
+    txt = pathlib.Path(chat_engine.__file__).with_name("chat_prompt.md").read_text(encoding="utf-8")
+    ck("sounding human is stated as outranking the rest",
+       "outranks everything else" in txt)
+    ck("listing topics is banned outright", "Never list topics" in txt)
+    ck("not every message needs a question",
+       "Not every message needs a question" in txt)
+    ck("reacting comes before working", "React before you work" in txt)
+    ck("memory is one fact, not a recital", "ONE thing, when it is relevant" in txt)
+    # The rule that caused it must be gone, and brevity explicitly allowed.
+    ck("the agenda-forcing rule is removed",
+       "If a reply could end the conversation" not in txt)
+    ck("being short is not treated as a dead end",
+       "Being SHORT is not a dead end" in txt)
+
+
 def test_medical_boundary_is_doctor_owned_not_everyday():
     """Over-firing makes Mira useless. Under-firing is unsafe. Both are bugs.
 
@@ -906,6 +950,7 @@ def main():
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
                test_chat_has_a_semantic_safety_backstop,
+               test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
                test_chat_survives_a_restart,
                test_chat_ui_queues_instead_of_dropping,

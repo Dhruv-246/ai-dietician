@@ -43,6 +43,23 @@ BUDGETS = {
 }
 
 MAX_BUBBLES = int(os.getenv("CHAT_MAX_BUBBLES", "3"))
+
+# Openers and one-word acknowledgements. A greeting handed a 30-word budget is
+# a greeting with room to pad, and the model fills it -- "hi" came back as
+# "Hey Ansh! Kaise ho? Kuch naya hua is week mein — sleep, digestion, ya
+# khana — jo discuss karein?" A prompt rule alone loses to an available
+# budget, so bound it mechanically too.
+_SMALL_TALK = re.compile(
+    r"^\s*(?:hi+|hey+|hello+|helo|yo|namaste|namaskar|good\s*(?:morning|"
+    r"afternoon|evening|night)|gm|gn|salaam|assalam\w*|kaise\s*ho|kya\s*"
+    r"haal|sup|thanks?|thank\s*you|thx|shukriya|ok|okay|okk+|hmm+|haan|ha|"
+    r"ji|yes|no|nahi|bye|cya|tata|good\s*night)\W*$", re.I)
+
+
+def is_small_talk(text: str) -> bool:
+    """True for an opener or a bare acknowledgement -- something that wants a
+    reply in kind, not an agenda."""
+    return bool(_SMALL_TALK.match((text or "").strip()))
 CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "700"))
 
 
@@ -443,6 +460,17 @@ async def handle_turn(session, user_text: str, user_context: str,
         log(f"chat trigger {read.get('trigger') or 'regex'} -- scripted line + continue")
 
     budget = out.get("budget") or BUDGETS["explain"]
+    if is_small_talk(user_text) and not hard:
+        budget = BUDGETS["ack"]
+        directive = (
+            "They said hello, or acknowledged you. Reply in kind and STOP.\n"
+            "Do NOT offer topics, do NOT list what you could help with, do "
+            "NOT bring up anything you remember about them, do NOT ask what "
+            "they want to discuss. A greeting is not an opening for work.\n"
+            'GOOD: "Hey Ansh! Kaise ho?"   GOOD: "Haan bilkul 🙂"\n'
+            'BAD:  "Kaise ho? Kuch naya hua is week — sleep, digestion, ya '
+            'khana?"\n\n' + directive)
+        log("chat small talk -- ack budget, no agenda")
     if not out.get("may_advise"):
         directive += ("\n\nYou do NOT have enough about this yet to advise. "
                       "Ask the ONE thing you most need, and do not prescribe.")

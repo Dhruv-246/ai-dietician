@@ -1848,10 +1848,11 @@ async def healthz():
 # is a read, not new bookkeeping.                                             #
 # --------------------------------------------------------------------------- #
 
-CHAT_GREETING = os.getenv(
-    "CHAT_GREETING",
-    "Hi! Main Mira hoon 🙂 Kuch bhi poochh sakte ho — khaane, sleep, "
-    "energy, ya apne plan ke baare mein.")
+# Deliberately NOT a menu. The old one listed topics -- "khaane, sleep,
+# energy, ya apne plan ke baare mein" -- and the model copied that shape into
+# its own greetings: "Kuch naya hua is week mein — sleep, digestion, ya khana?"
+# Nobody opens a conversation by reading out options. Greet, and stop.
+CHAT_GREETING = os.getenv("CHAT_GREETING", "Hey! Kaise ho? 🙂")
 
 CHAT_LOCKED = ("Chat abhi sirf un users ke liye hai jinki onboarding call "
                "ho chuki hai. Call complete kijiye, phir yahin milte hain.")
@@ -1899,7 +1900,7 @@ async def chat_history(uid: str = ""):
             msgs = [{"role": m.get("role"), "text": m.get("text")}
                     for m in (row.get("messages") or []) if m.get("text")]
     name = str(profile.get("name", "")).strip()
-    greet = CHAT_GREETING if not name else CHAT_GREETING.replace("Hi!", f"Hi {name}!")
+    greet = CHAT_GREETING if not name else CHAT_GREETING.replace("Hey!", f"Hey {name}!")
     return {"messages": msgs, "greeting": greet}
 
 
