@@ -410,6 +410,53 @@ def test_chat_has_a_semantic_safety_backstop():
     ck("EMERGENCY is hard in P-3", "EMERGENCY" in p3_graph.P3_HARD_TRIGGERS)
 
 
+def test_stages_are_judged_not_counted():
+    """A stage advances when its JOB is done, not when the clock says so.
+
+    Before: the thread marched UNDERSTAND -> ADVISE -> CONFIRM -> CLOSE while
+    Mira was still asking questions and getting "pata nahi" back. The stage
+    label said ADVISE; nothing had been advised. Turn count is not
+    understanding.
+    """
+    import inspect
+    src = inspect.getsource(chat_engine)
+
+    # Two judgements, folded into the read that already runs each turn -- no
+    # extra round trip.
+    ck("the read judges whether they answered", '"answered": true|false' in src)
+    ck("the read judges the CURRENT stage", '"stage_done": true|false' in src)
+    ck("the model is told which stage to judge", '"current_stage"' in src)
+    ck("and what Mira actually asked", '"mira_just_asked"' in src)
+    ck("stage_done is defined per stage, not globally",
+       "UNDERSTAND  do you know WHAT the problem is" in src)
+    ck("it is told to judge the conversation, not the turns",
+       "Judge the CONVERSATION, not the number of turns" in src)
+
+    # answered must be about CONTENT. The first version listed "pata nahi" as
+    # not-answered and then said "I don't know" counts as answered -- a
+    # contradiction, and the hold never fired.
+    ck("answered is judged on content", "Judge the content, not the effort" in src)
+    ck("empty politeness does not count", '"pata nahi"' in src and "carry nothing" in src)
+    ck("a genuine cannot-know still counts", "apna weight nahi" in src)
+
+    # Escalation, the shape P-2 already proves: rephrase, ease, stop.
+    ck("first miss rephrases", "DIFFERENT, simpler" in src)
+    ck("second miss offers an either/or", "either/or" in src)
+    ck("third miss stops asking", "STOP asking it" in src)
+    ck("the counter resets on a real answer", "session.unclear = 0" in src)
+
+    import p3_graph
+    gsrc = inspect.getsource(p3_graph)
+    ck("an unanswered turn holds the stage", "holding at" in gsrc)
+    ck("and does not burn the dwell clock",
+       "active.stage_turns = max(0, active.stage_turns - 1)" in gsrc)
+    ck("stage_done can advance a stage on its own",
+       "sufficient or stage_done" in gsrc)
+
+    s = chat_session.ChatSession("u")
+    ck("a session starts with no unclear streak", s.unclear == 0)
+
+
 def test_advice_is_stated_not_floated():
     """Mira must not ask whether her own advice will work.
 
@@ -1145,6 +1192,7 @@ def main():
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
                test_chat_has_a_semantic_safety_backstop,
+               test_stages_are_judged_not_counted,
                test_advice_is_stated_not_floated,
                test_problem_threads_have_their_own_checklist,
                test_thread_accumulates_problem_details,

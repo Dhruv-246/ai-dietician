@@ -73,7 +73,9 @@ You read ONE chat message from a dietician's client. You never speak to the
 user. Return JSON only:
 
 {"extracted": {"<schema path>": "<value>"},
- "trigger": null|"EMERGENCY"|"MEDICAL"|"PRICING"|"MIRA_IDENTITY"|"SENSITIVE"}
+ "trigger": null|"EMERGENCY"|"MEDICAL"|"PRICING"|"MIRA_IDENTITY"|"SENSITIVE",
+ "answered": true|false,
+ "stage_done": true|false}
 
 TRIGGER — set it whenever the message belongs to that category, however it is
 phrased. A pattern list only catches wordings someone thought of in advance;
@@ -98,6 +100,25 @@ you are the layer that catches the rest.
   PRICING        cost, fees, plans, what is free or paid.
   MIRA_IDENTITY  whether you are human, AI, a bot.
   SENSITIVE      shame, body image, what people will think.
+
+answered   — did this message give Mira any of the INFORMATION she asked for?
+             Judge the content, not the effort.
+             FALSE: "pata nahi", "kuch bhi", "hmm", "acha", silence, a garbled
+                    message, or an answer to a different question. Polite, but
+                    they carry nothing.
+             TRUE:  any real detail, even partial or vague -- "raat mein",
+                    "roz", "thoda sa". Also true when they genuinely cannot
+                    know a fact and say so specifically ("apna weight nahi
+                    pata"), because re-asking will never produce it.
+stage_done — has the CURRENT stage finished its job? You are told the stage.
+             UNDERSTAND  do you know WHAT the problem is, in their words?
+             GATHER      do you know enough about it to say something useful --
+                         roughly when, how often, what it affects?
+             REFLECT     has the pattern been named back to them?
+             ADVISE      has ONE concrete recommendation actually been given?
+             CONFIRM     have they responded to that recommendation?
+             Judge the CONVERSATION, not the number of turns. If Mira has been
+             asking and getting nowhere, the stage is NOT done.
 
 Default to null. Only set MEDICAL when a real diagnosis, medication, test
 result or procedure is NAMED, or when it is a genuine EMERGENCY. Over-firing
@@ -151,7 +172,8 @@ def merge_facts(pending: dict, found: dict) -> dict:
     return out
 
 
-async def read_message(user_text: str) -> dict:
+async def read_message(user_text: str, mira_last: str = "",
+                       stage: str = "") -> dict:
     """One cheap call per message: durable facts AND a safety category.
 
     The category matters as much as the facts. Chat reached production with
@@ -173,11 +195,14 @@ async def read_message(user_text: str) -> dict:
     Returns {"extracted": {...}, "trigger": name-or-None}.
     """
     if not (user_text or "").strip():
-        return {"extracted": {}, "trigger": None}
+        return {"extracted": {}, "trigger": None,
+                "answered": False, "stage_done": False}
     paths = "\n".join(f"  {p}" for p in sorted(memory_facts.SCHEMA))
     data = await llm_client.complete_json(
         _EXTRACT_SYSTEM + "\nALLOWED PATHS\n" + paths,
-        json.dumps({"user_said": user_text}, ensure_ascii=False),
+        json.dumps({"mira_just_asked": (mira_last or "")[:300],
+                    "current_stage": stage or "UNDERSTAND",
+                    "user_said": user_text}, ensure_ascii=False),
         kind="fast", max_tokens=400, temperature=0.0, timeout=8.0)
     out = {}
     for k, v in (data.get("extracted") or {}).items():
@@ -191,7 +216,12 @@ async def read_message(user_text: str) -> dict:
     # exactly wrong here.
     if trig not in (p3_graph.P3_HARD_TRIGGERS | p3_graph.P3_SOFT_TRIGGERS):
         trig = None
-    return {"extracted": out, "trigger": trig}
+    return {"extracted": out, "trigger": trig,
+            # Default answered=True: treating a real answer as a non-answer
+            # makes Mira re-ask something she was just told, which is the
+            # failure users notice most. Missing/uncertain is the safer no.
+            "answered": bool(data.get("answered", True)),
+            "stage_done": bool(data.get("stage_done", False))}
 
 
 # ----------------------------------------------------------- summarisation --
@@ -388,7 +418,10 @@ async def handle_turn(session, user_text: str, user_context: str,
     #    the reply that answers it -- not one turn late.
     read = {"extracted": {}, "trigger": None}
     try:
-        read = await read_message(user_text)
+        mira_last = next((m["text"] for m in reversed(session.messages[:-1])
+                          if m["role"] == "assistant"), "")
+        cur_stage = next((t.stage for t in session.threads if not t.parked), "")
+        read = await read_message(user_text, mira_last, cur_stage)
         found = read.get("extracted") or {}
         if found:
             # merge_facts, not update: a list path must accumulate. See above.
@@ -407,6 +440,8 @@ async def handle_turn(session, user_text: str, user_context: str,
         "ledger_view": view,
         "fact_ages": {},
         "history": session.window()[:-1],
+        "answered": read.get("answered", True),
+        "stage_done": read.get("stage_done", False),
         "trace": [],
     })
     for line in out.get("trace", []):
@@ -458,6 +493,29 @@ async def handle_turn(session, user_text: str, user_context: str,
             "conversation either. Ask one useful thing, or offer what you can "
             "actually do.\n\n" + directive)
         log(f"chat trigger {read.get('trigger') or 'regex'} -- scripted line + continue")
+
+    if not read.get("answered", True) and not hard:
+        session.unclear = getattr(session, "unclear", 0) + 1
+        n = session.unclear
+        if n == 1:
+            directive = (
+                "That did not answer what you asked — they may not have "
+                "understood it. Ask the SAME thing again in DIFFERENT, simpler "
+                "words. Never repeat your previous sentence.\n\n" + directive)
+        elif n == 2:
+            directive = (
+                "They still have not answered. Stop asking openly — make it "
+                "trivially easy with a concrete either/or they can pick from, "
+                "in one short line.\n\n" + directive)
+        else:
+            directive = (
+                "They have not answered this three times. STOP asking it. Say "
+                "warmly that it is fine, and either move to something else you "
+                "can help with or offer what you can without it. Do NOT ask "
+                "this again.\n\n" + directive)
+        log(f"chat unanswered #{n} -- re-asking differently")
+    elif read.get("answered", True):
+        session.unclear = 0
 
     budget = out.get("budget") or BUDGETS["explain"]
     if is_small_talk(user_text) and not hard:

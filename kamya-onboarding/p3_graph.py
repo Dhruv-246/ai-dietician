@@ -222,6 +222,8 @@ class ConvState(TypedDict, total=False):
     fact_ages: Dict[str, str]
     history: List[Dict[str, str]]
     # produced
+    answered: bool          # did this turn answer what was asked?
+    stage_done: bool        # has the current stage finished its job?
     safety_hit: Optional[str]
     soft_safety: Optional[str]
     lane: str
@@ -523,8 +525,27 @@ def _node_plan(state: ConvState) -> ConvState:
         elif not gather["missing"]:
             trace.append("holding at UNDERSTAND — problem statement is vague")
     else:
+        # STAGE READINESS IS JUDGED, NOT COUNTED.
+        #
+        # `sufficient` is the router's one global "can I advise?", which says
+        # nothing about whether UNDERSTAND or REFLECT finished their own job.
+        # `stage_done` is read per turn against the CURRENT stage, so each
+        # stage is asked whether it is actually done.
+        #
+        # And a turn that answered NOTHING must not advance anything. Without
+        # this the clock carried the thread forward while Mira asked the same
+        # thing three ways -- stage said ADVISE while the conversation was
+        # still in UNDERSTAND, so nothing was ever advised.
         sufficient = bool((state.get("router_raw") or {}).get("sufficient"))
-        nxt = tm.next_stage(active, gather, sufficient)
+        stage_done = bool(state.get("stage_done"))
+        answered = state.get("answered", True)
+
+        if not answered:
+            active.stage_turns = max(0, active.stage_turns - 1)
+            trace.append(f"turn did not answer -- holding at {active.stage}")
+            nxt = active.stage
+        else:
+            nxt = tm.next_stage(active, gather, sufficient or stage_done)
         if nxt != active.stage:
             trace.append(f"stage {active.stage} -> {nxt}")
             active.stage = nxt

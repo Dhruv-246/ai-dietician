@@ -71,6 +71,9 @@ class ChatSession:
         self.pending_facts: dict = {}     # extracted, not yet consolidated
         self.threads: list = []           # thread-machine state
         self.turn_index = 0
+        # Consecutive turns that did not answer what was asked. Drives the
+        # escalation: rephrase, then offer an either/or, then stop asking.
+        self.unclear = 0
         self.closed = False
 
     # ------------------------------------------------------------ messages --
