@@ -410,6 +410,45 @@ def test_chat_has_a_semantic_safety_backstop():
     ck("EMERGENCY is hard in P-3", "EMERGENCY" in p3_graph.P3_HARD_TRIGGERS)
 
 
+def test_advice_is_stated_not_floated():
+    """Mira must not ask whether her own advice will work.
+
+    Live chat 2026-09-01: "Kya agar dinner ko bahut halka rakho — bas ek bowl
+    dal ya kuch light sabzi — toh man kar sakta hai?" That hands the judgement
+    back to the person who came asking because they did not have it. The
+    ADVISE directive said "end with AT MOST one short question" and said
+    nothing about WHAT to ask, so the model turned the recommendation itself
+    into the question.
+    """
+    import thread_machine as tm
+    g = {"known": {"current_pattern.dinner.time": "10pm"}, "stale": [],
+         "missing": []}
+    d = tm.stage_directive(tm.Thread(topic="appetite", stage=tm.S_ADVISE), g)["directive"]
+    ck("advice is ordered in the imperative", "as a recommendation" in d)
+    ck("hedging it into a question is banned",
+       "NEVER ask whether your own advice will work" in d)
+    ck("the real hedged sentence is shown as the BAD example",
+       "kya agar aap dinner" in d)
+    ck("a trailing question must be about something NEW",
+       "only about something NEW" in d)
+    ck("and no question at all is allowed",
+       "no question at all is fine" in d)
+
+    # CONFIRM asks whether they CAN, never whether it WILL work -- the second
+    # re-opens the advice that was just given.
+    c = tm.stage_directive(tm.Thread(topic="appetite", stage=tm.S_CONFIRM), g)["directive"]
+    ck("confirm asks about doability", "DOABLE" in c)
+    ck("confirm does not re-litigate the advice",
+       "not whether it will work" in c and "Never re-open" in c)
+
+    import pathlib
+    txt = pathlib.Path(chat_engine.__file__).with_name("chat_prompt.md").read_text(encoding="utf-8")
+    ck("the prompt tells her to commit", "When you advise, commit" in txt)
+    ck("say it, do not float it", "Say it, do not float it" in txt)
+    ck("asking if they CAN is still allowed",
+       "Asking whether they CAN do it is fine" in txt)
+
+
 def test_problem_threads_have_their_own_checklist():
     """A complaint needs its own things to find out.
 
@@ -1106,6 +1145,7 @@ def main():
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
                test_chat_has_a_semantic_safety_backstop,
+               test_advice_is_stated_not_floated,
                test_problem_threads_have_their_own_checklist,
                test_thread_accumulates_problem_details,
                test_memory_prefill_is_not_understanding,

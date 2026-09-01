@@ -605,10 +605,29 @@ def stage_directive(thread, gather):
                  "give ONE safe, general suggestion and be honest that you would "
                  "need to know more to tailor it. Do NOT invent details about "
                  "their diet, timings or health.")
-        d += (" ONE suggestion only, never a list of options. End with AT MOST "
-              "one short question, or no question at all.")
+        d += (
+            " ONE suggestion only, never a list of options."
+            # "End with at most one question" said nothing about WHAT to ask,
+            # and the model turned its own recommendation into the question --
+            # live chat 2026-09-01: "Kya agar dinner ko bahut halka rakho — bas
+            # ek bowl dal — toh man kar sakta hai?" That asks the USER whether
+            # the advice will work. They came here because they do not know;
+            # handing the judgement back is not humility, it is no answer.
+            " STATE the suggestion as a recommendation, in the imperative —"
+            " 'aaj dinner halka rakhiye, ek bowl dal', not 'kya agar aap dinner"
+            " halka rakho toh madad karega?'. You are the dietician: you decide"
+            " what to try, they decide whether they can."
+            " NEVER ask whether your own advice will work, will help, or sounds"
+            " right. Do not hedge it into a question."
+            " You may end with at most ONE short question, and only about"
+            " something NEW — a detail you still need, or whether the change"
+            " fits their routine. Ending with no question at all is fine.")
     elif st == S_CONFIRM:
-        d = "Briefly check whether that feels doable for them. One short question."
+        # DOABLE, not effective. "Will it help?" is your call, not theirs --
+        # asking it undoes the advice you just gave.
+        d = ("Briefly check whether that is DOABLE for them — whether it fits "
+             "their routine, not whether it will work. One short question. "
+             "Never re-open whether the suggestion itself was right.")
     else:
         d = "Wrap this topic up warmly in one short line."
 
