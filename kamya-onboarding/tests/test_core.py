@@ -120,12 +120,14 @@ def test_extraction():
 def test_stages():
     g_none = {"known": {}, "stale": [], "missing": ["x"]}
     g_some = {"known": {"a": "1"}, "stale": [], "missing": ["x"]}
+    # template="PLAN": this is the GENERIC stage path. A PROBLEM thread has its
+    # own checklist gate, covered in test_problem_threads_have_their_own_checklist.
     ck("REFLECT skipped when nothing is known",
-       tm.next_stage(tm.Thread(topic="t", stage=tm.S_GATHER, stage_turns=2),
-                     g_none, False) == tm.S_ADVISE)
+       tm.next_stage(tm.Thread(topic="t", template="PLAN", stage=tm.S_GATHER,
+                               stage_turns=2), g_none, False) == tm.S_ADVISE)
     ck("REFLECT entered when something is known",
-       tm.next_stage(tm.Thread(topic="t", stage=tm.S_GATHER, stage_turns=2),
-                     g_some, False) == tm.S_REFLECT)
+       tm.next_stage(tm.Thread(topic="t", template="PLAN", stage=tm.S_GATHER,
+                               stage_turns=2), g_some, False) == tm.S_REFLECT)
 
     # QUICK must not become a side door around the advice gate.
     for stage in (tm.S_UNDERSTAND, tm.S_GATHER, tm.S_REFLECT):
@@ -408,6 +410,83 @@ def test_chat_has_a_semantic_safety_backstop():
     ck("EMERGENCY is hard in P-3", "EMERGENCY" in p3_graph.P3_HARD_TRIGGERS)
 
 
+def test_problem_threads_have_their_own_checklist():
+    """A complaint needs its own things to find out.
+
+    A problem thread used to plan its gathering from SCHEMA paths, which
+    describe facts we STORE, not the shape of a complaint. There is no path
+    for "since when" or "which meals", so the machine could not ask them --
+    and re-asked what it had been told. These live on the THREAD, never in the
+    ledger: "started 3 days ago" describes an episode and would be wrong
+    forever if written to memory.
+    """
+    import thread_machine as tm
+
+    t = tm.Thread(topic="appetite", template="PROBLEM",
+                  needed_paths=["health.conditions"])
+    tm.seed_problem_probes(t)
+    ck("all six probes are seeded", len(tm.PROBE_KEYS) == 6)
+    ck("they are requested as adhoc, never as schema paths",
+       all(k in t.adhoc for k in tm.PROBE_KEYS)
+       and not any(k in t.needed_paths for k in tm.PROBE_KEYS))
+
+    # Only PROBLEM threads get them -- a plan or a habit is not a complaint.
+    for tpl in ("PLAN", "HABIT"):
+        other = tm.Thread(topic="x", template=tpl)
+        tm.seed_problem_probes(other)
+        ck(f"{tpl} threads get no probes", other.adhoc == [])
+
+    g = tm.plan_gather(t, {}, {})
+    ck("unanswered probes show as missing",
+       all(k in g["missing"] for k in tm.PROBE_KEYS))
+    ck("probes are asked before profile top-ups",
+       tm.rank_gaps(g["missing"], t.needed_paths)[0] == "probe.what")
+
+    d = tm.stage_directive(
+        tm.Thread(topic="appetite", template="PROBLEM", stage=tm.S_GATHER,
+                  adhoc=list(t.adhoc)), g)["directive"]
+    ck("the directive asks it in words, not as a key name",
+       "what exactly is happening" in d and "probe." not in d, d[:90])
+
+    # The checklist is a FLOOR. Exhausting all six would be an interrogation.
+    def at(n):
+        th = tm.Thread(topic="a", template="PROBLEM", stage=tm.S_GATHER,
+                       needed_paths=["health.conditions"])
+        tm.seed_problem_probes(th)
+        for k in tm.PROBE_KEYS[:n]:
+            th.slots[k] = "answered"
+        return tm.next_stage(th, tm.plan_gather(th, {}, {}), False)
+    for n in range(tm.MIN_PROBES):
+        ck(f"{n} probes is not enough to advise", at(n) == tm.S_GATHER)
+    ck(f"{tm.MIN_PROBES} probes is enough", at(tm.MIN_PROBES) != tm.S_GATHER)
+    ck("it does not wait for all six", tm.MIN_PROBES < len(tm.PROBE_KEYS))
+
+    # The model saying "I can advise" must not jump the floor -- it did
+    # exactly that after a single symptom word.
+    early = tm.Thread(topic="a", template="PROBLEM", stage=tm.S_GATHER)
+    tm.seed_problem_probes(early)
+    ck("the model cannot advise before the floor is met",
+       tm.next_stage(early, tm.plan_gather(early, {}, {}), True) == tm.S_GATHER)
+
+    # But nothing may deadlock.
+    stuck = tm.Thread(topic="a", template="PROBLEM", stage=tm.S_GATHER,
+                      stage_turns=tm.MAX_STAGE_TURNS)
+    tm.seed_problem_probes(stuck)
+    ck("the dwell clock still rescues a stalled thread",
+       tm.next_stage(stuck, tm.plan_gather(stuck, {}, {}), False) != tm.S_GATHER)
+    ck("gather dwell is sized to fit the checklist",
+       tm.MIN_PROBES + 1 > tm.DWELL[tm.S_GATHER])
+
+    # The router has to know the keys or it cannot fill them from an opening
+    # message -- "3-4 din se kya hogya" answers probe.onset.
+    import p3_graph, inspect
+    ck("the router is told the probe keys",
+       "probe.onset" in inspect.getsource(p3_graph))
+    m, extra = tm.map_extracted({"probe.onset": "3-4 days"}, t)
+    ck("probe keys survive mapping untouched",
+       (m or extra).get("probe.onset") == "3-4 days")
+
+
 def test_thread_accumulates_problem_details():
     """A thread must remember every detail, not just the latest phrasing.
 
@@ -459,13 +538,18 @@ def test_memory_prefill_is_not_understanding():
     g = {"known": dict(t.slots), "missing": [], "stale": []}
     one = tm.Thread(topic="p", stage=tm.S_GATHER, slots=dict(t.slots),
                     prefilled=list(t.prefilled))
+    # Thread.template defaults to PROBLEM, which is now load-bearing: an
+    # unlabelled thread gets the complaint checklist. That is the safer
+    # default -- most threads a user opens ARE complaints.
+    ck("an unlabelled thread is treated as a PROBLEM",
+       tm.Thread(topic="x").template == "PROBLEM")
     ck("one answer is not enough to leave GATHER",
        tm.next_stage(one, g, False) == tm.S_GATHER)
 
     t.slots["d"] = "and this"
     g2 = {"known": dict(t.slots), "missing": [], "stale": []}
-    two = tm.Thread(topic="p", stage=tm.S_GATHER, slots=dict(t.slots),
-                    prefilled=list(t.prefilled))
+    two = tm.Thread(topic="p", template="PLAN", stage=tm.S_GATHER,
+                    slots=dict(t.slots), prefilled=list(t.prefilled))
     ck("two answers move it on", tm.next_stage(two, g2, False) != tm.S_GATHER)
 
     # The anti-stall paths must still work, or a thread could deadlock.
@@ -474,7 +558,7 @@ def test_memory_prefill_is_not_understanding():
        tm.next_stage(stalled, {"known": {"x": 1}, "missing": ["y"], "stale": []},
                      False) != tm.S_GATHER)
     ck("the model's own 'sufficient' still advances",
-       tm.next_stage(tm.Thread(topic="p", stage=tm.S_GATHER),
+       tm.next_stage(tm.Thread(topic="p", template="PLAN", stage=tm.S_GATHER),
                      {"known": {"x": 1}, "missing": ["y"], "stale": []},
                      True) != tm.S_GATHER)
 
@@ -1022,6 +1106,7 @@ def main():
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
                test_chat_has_a_semantic_safety_backstop,
+               test_problem_threads_have_their_own_checklist,
                test_thread_accumulates_problem_details,
                test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,

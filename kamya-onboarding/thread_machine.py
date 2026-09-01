@@ -220,6 +220,8 @@ def _expand(tokens):
 
 
 def map_extracted(raw, thread):
+    # probe.* keys are already the right name -- they are thread state, never
+    # schema paths, so they bypass the leaf-matching entirely.
     """Map whatever keys the router invented onto REAL schema paths.
 
     The router is asked to key its extractions by schema path, but it will not
@@ -284,6 +286,17 @@ def map_extracted(raw, thread):
 
 
 def rank_gaps(gaps, needed_order):
+    """Probes first, then schema paths in planned order, identity last."""
+    probes = [g for g in gaps if g in PROBE_KEYS]
+    if probes:
+        probes.sort(key=lambda g: PROBE_KEYS.index(g))
+        rest = _rank_schema_gaps([g for g in gaps if g not in PROBE_KEYS],
+                                 needed_order)
+        return probes + rest
+    return _rank_schema_gaps(gaps, needed_order)
+
+
+def _rank_schema_gaps(gaps, needed_order):
     """Most useful missing thing first. Family priority beats router order."""
     order = {p: i for i, p in enumerate(needed_order or [])}
     return sorted(gaps, key=lambda g: (GAP_PRIORITY.get(g.split(".")[0], 7),
@@ -319,6 +332,71 @@ def prefill(thread, gather):
 # an understanding: "no appetite" names the complaint without establishing
 # when, since when, or what changed.
 MIN_LEARNED_HERE = int(os.getenv("P3_MIN_LEARNED", "2"))
+
+
+# --------------------------------------------------------------- probes ----
+# WHERE PROBLEM DETAILS LIVE, and why not in the memory schema.
+#
+# "It started 3-4 days ago", "only at night", "just dinner" describe ONE
+# EPISODE. The schema stores what is durably true about a person -- their diet,
+# their meal pattern, their conditions -- and consolidation already refuses
+# events ("I ate poha today" is an event, not memory). Writing an episode into
+# the ledger would leave "started 3 days ago" true forever.
+#
+# So they live on the THREAD, in thread.slots, keyed by these probe names and
+# requested through thread.adhoc, which plan_gather already treats as
+# never-in-the-ledger. Threads persist with the chat session (chat_store), so
+# the answers survive a restart and a resumed thread days later. Three
+# lifetimes, deliberately:
+#
+#   thread.slots   this episode. Dies with the thread.
+#   ledger         durable facts. Only what consolidation judges lasting.
+#   open_loops     the bridge -- "his appetite thing was never resolved".
+#
+# The order below is the order they get asked in. It is a checklist, not a
+# script: anything the user already answered is skipped, and MIN_PROBES stops
+# it becoming an interrogation.
+PROBLEM_PROBES = [
+    ("probe.what",     "what exactly is happening"),
+    ("probe.when",     "which meals or times of day it affects"),
+    ("probe.onset",    "when it started"),
+    ("probe.often",    "how often it happens"),
+    ("probe.changed",  "what changed recently"),
+    ("probe.else",     "anything else that feels connected"),
+]
+PROBE_KEYS = [k for k, _ in PROBLEM_PROBES]
+
+# How many probes must be answered before a problem thread may advise. Not all
+# six -- six questions in a row is an interrogation, which is the failure the
+# thread machine exists to prevent.
+MIN_PROBES = int(os.getenv("P3_MIN_PROBES", "3"))
+
+
+def seed_problem_probes(thread):
+    """Give a PROBLEM thread its own things to find out.
+
+    Without this a problem thread plans its gathering from SCHEMA paths, which
+    describe facts we store rather than the shape of a complaint. There is no
+    path for "since when" or "which meals", so the machine could not ask them
+    -- and kept re-asking what it had already been told.
+    """
+    if thread.template != "PROBLEM":
+        return thread
+    for key in PROBE_KEYS:
+        if key not in thread.adhoc:
+            thread.adhoc.append(key)
+    return thread
+
+
+def probe_hint(key):
+    for k, hint in PROBLEM_PROBES:
+        if k == key:
+            return hint
+    return key
+
+
+def probes_answered(thread):
+    return [k for k in PROBE_KEYS if str(thread.slots.get(k, "")).strip()]
 
 
 def add_adhoc_slot(thread, key, value, cap=6):
@@ -382,7 +460,15 @@ def next_stage(thread, gather, sufficient):
     DWELL. Waiting for every slot is what turns gathering into a form.
     """
     st = thread.stage
-    dwelled = thread.stage_turns >= DWELL.get(st, 1)
+    limit = DWELL.get(st, 1)
+    if st == S_GATHER and thread.template == "PROBLEM":
+        # DWELL[GATHER] is 2, tuned for a voice call where every turn costs the
+        # user time. A complaint needs at least MIN_PROBES answers, and you
+        # cannot get three answers in two turns -- so the clock fired first and
+        # the thread reached ADVISE still not knowing the problem. Give it room
+        # to actually finish the checklist; MAX_STAGE_TURNS remains the backstop.
+        limit = max(limit, MIN_PROBES + 1)
+    dwelled = thread.stage_turns >= limit
 
     # A plan whose slots were filled FROM MEMORY is not a problem we have
     # understood -- it is a problem we have labelled. Live chat, 2026-09-01:
@@ -397,18 +483,36 @@ def next_stage(thread, gather, sufficient):
     # something. `sufficient` (the model's own judgement) and `dwelled` (the
     # anti-stall clock) still advance regardless, so this cannot deadlock.
     enough_learned = len(learned_here(thread)) >= MIN_LEARNED_HERE
+    is_problem = thread.template == "PROBLEM"
+    if is_problem:
+        # For a complaint, understanding means the PROBES are answered. Profile
+        # slots being full says nothing about the problem -- two of them are
+        # usually prefilled from memory anyway.
+        enough_learned = len(probes_answered(thread)) >= MIN_PROBES
+
+    # The checklist is a FLOOR, not a list to exhaust. Once MIN_PROBES are
+    # answered the rest are optional, so leftover probes must not keep the
+    # thread in GATHER -- six questions in a row is the interrogation this
+    # machine exists to prevent.
+    ready = enough_learned and (is_problem or not gather["missing"])
+
+    # ...and the model's own "I can advise now" must not jump the floor. It
+    # said sufficient after a single symptom word on 2026-09-01, which is how
+    # a thread reached ADVISE still not knowing what the problem was.
+    if is_problem and not enough_learned:
+        sufficient = False
 
     if st == S_UNDERSTAND:
         # Skip GATHER when nothing is genuinely missing, or when the user's
         # opening message alone was enough to act on. NOTE: `stale` does NOT
         # force a gather turn — a slightly out-of-date fact is worth confirming
         # inside another sentence, never worth spending a whole turn asking for.
-        if sufficient or (not gather["missing"] and enough_learned):
+        if sufficient or ready:
             return S_REFLECT if has_reflectable(gather) else S_ADVISE
         return S_GATHER
 
     if st == S_GATHER:
-        if sufficient or (not gather["missing"] and enough_learned) or dwelled:
+        if sufficient or ready or dwelled:
             # Force-advanced with nothing learned (two sideways answers, say):
             # skip the reflection and work with what we have rather than
             # narrating our own ignorance back at them.
@@ -560,6 +664,10 @@ def quick_directive(situation="", active=None, explicit_advice_request=False):
 
 
 def _humanise(path):
+    # A probe is already written the way it should be asked; running it
+    # through the path prettifier would produce "probe when".
+    if path in PROBE_KEYS:
+        return probe_hint(path)
     return (path or "").replace("current_pattern.", "").replace("_", " ").replace(".", " ")
 
 

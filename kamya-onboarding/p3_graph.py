@@ -169,6 +169,19 @@ measurements. Do not request a fact you could not act on.
 ALLOWED PATHS
 {_PATHS}
 
+PROBLEM PROBES — when the user is describing a complaint, put what they tell
+you about it under these EXACT keys in `extracted`. They are not schema paths;
+they describe this episode, and they are how the thread understands the
+problem rather than merely labelling it. Fill any the message answers, even
+in passing — "3-4 din se kya hogya" answers probe.onset, and failing to catch
+it means asking again two turns later.
+  probe.what     what exactly is happening
+  probe.when     which meals or times of day it affects
+  probe.onset    when it started
+  probe.often    how often it happens
+  probe.changed  what changed recently
+  probe.else     anything else they connect to it
+
 adhoc — at most ONE, only for something the schema genuinely cannot express
 (e.g. "stress at work"). Sleep timing IS in the schema now
 (lifestyle.sleep_time) — use the path, never adhoc. Never restate the topic
@@ -415,11 +428,17 @@ def _node_lane(state: ConvState) -> ConvState:
             adhoc=adhoc[:1],
             opened_at=int(state.get("turn_index", 0)),
         )
+        # A PROBLEM thread gets its own checklist -- what, when, since when,
+        # how often, what changed. Those are not schema paths (they describe an
+        # episode, not a durable fact), so without seeding them the machine
+        # literally cannot ask and ends up re-asking what it was told.
+        tm.seed_problem_probes(th)
         threads.insert(0, th)
         threads, spill = tm.spill_oldest(threads)
         if spill:
             trace.append(f"spilled {len(spill)} thread(s) to open loops")
-        trace.append(f"thread OPEN '{th.topic}' paths={len(th.needed_paths)}")
+        trace.append(f"thread OPEN '{th.topic}' paths={len(th.needed_paths)} "
+                     f"probes={len(th.adhoc)}")
 
     elif lane == tm.LANE_RESUME:
         target = tm.find_parked(threads, routed.get("resume_hint") or routed.get("topic"))
