@@ -572,6 +572,12 @@ async def handle_turn(session, user_text: str, user_context: str,
     if not reply.strip():
         reply = "Sorry, samajh nahi aaya. Thoda aur bata sakte ho?"
 
+    # Guardrails. The directive ASKS for the off-topic shape; this GUARANTEES
+    # it. Live, three off-topic turns with an explicit directive and worked
+    # examples: one followed it, two ignored it.
+    import chat_guard
+    reply = chat_guard.apply(reply, situation=out.get("situation", ""), log=log)
+
     session.add("assistant", reply)
 
     # 4. Slide the window: compress whatever fell out of view.

@@ -21,6 +21,7 @@ import onboarding_nodes as on   # noqa: E402
 import rag_query as rq          # noqa: E402
 import reply_shape              # noqa: E402
 import chat_engine              # noqa: E402
+import chat_guard               # noqa: E402
 import chat_session             # noqa: E402
 import chat_store               # noqa: E402
 import thread_machine as tm     # noqa: E402
@@ -742,6 +743,56 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
        "Never repeat the same deflection twice" in txt)
 
 
+def test_guard_guarantees_what_the_prompt_only_asks_for():
+    """The directive requested the off-topic shape; the model obeyed 1 in 3.
+
+    Live, 2026-09-02, with an explicit directive AND worked examples:
+        "capital of france" -> answer + scope offer     followed
+        "IPL ka final"      -> answer only              ignored
+        "mera phone slow"   -> five troubleshooting steps  ignored
+    """
+    # Missing the offer -> it gets added.
+    out = chat_guard.apply("IPL ka final May-June mein hota hai.",
+                           situation="OFF_TOPIC")
+    ck("an off-topic reply without the offer gets one",
+       chat_guard._HAS_OFFER.search(out) is not None, out)
+    ck("the original answer is kept, not replaced",
+       out.startswith("IPL ka final May-June mein hota hai."))
+
+    # Already has one -> left alone. Appending a second is the robotic
+    # repetition we are trying to remove.
+    had = "Paris hai. Main yahan aapki diet ke liye hoon, poochh lena."
+    ck("a reply that already offers is untouched",
+       chat_guard.apply(had, situation="OFF_TOPIC") == had)
+
+    # Only off-topic turns. A problem reply must not be told what she is for.
+    on_topic = "Dinner 10 pm theek hai."
+    ck("on-topic replies are untouched",
+       chat_guard.apply(on_topic, situation="PROBLEM") == on_topic)
+
+    # The offer names her purpose; it must never become a menu.
+    for offer in chat_guard.SCOPE_OFFERS:
+        ck(f"offer is an invitation, not a list: {offer[:22]!r}",
+           " ya " not in offer and "?" not in offer.replace("poochh", ""))
+
+    # Markdown reaches a chat bubble literally.
+    md = chat_guard.strip_markdown("**Diet tips:**\n- **Breakfast**: poha\n## Plan")
+    ck("bold markers are removed", "**" not in md)
+    ck("headings are removed", "#" not in md)
+    ck("bullets become something a bubble can render", "•" in md)
+    ck("the content itself survives", "Breakfast" in md and "poha" in md)
+
+    # A broken guard must never break the conversation.
+    ck("guard failure passes the reply through",
+       chat_guard.apply("hello", situation=None) == "hello")
+    ck("it can be turned off in one variable",
+       "CHAT_GUARD" in chat_guard.__doc__ or hasattr(chat_guard, "GUARD_ENABLED"))
+
+    import inspect
+    ck("the guard runs before the reply is stored",
+       "chat_guard.apply" in inspect.getsource(chat_engine.handle_turn))
+
+
 def test_off_topic_is_answered_briefly_and_dropped():
     """Something outside her remit gets one line, not a consultation.
 
@@ -1456,6 +1507,7 @@ def main():
                test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
+               test_guard_guarantees_what_the_prompt_only_asks_for,
                test_off_topic_is_answered_briefly_and_dropped,
                test_no_menus_anywhere,
                test_social_turns_are_not_steered_back,
