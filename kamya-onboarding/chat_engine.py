@@ -1,0 +1,399 @@
+"""P-3 chat turn handler.
+
+Reuses the voice brain deliberately. `p3_graph` imports no pipecat -- safety
+check, router, five lanes, and the UNDERSTAND -> GATHER -> REFLECT -> ADVISE
+-> CONFIRM -> CLOSE stage machine are all medium-independent, because they
+encode how a dietician should think rather than anything about audio. Forking
+them for chat would mean maintaining two copies of the one part that is
+genuinely hard to get right.
+
+What IS medium-specific lives here:
+  - the prompt (chat_prompt.md, not the voice one -- see WHY below)
+  - length budgets per message type, replacing the voice word cap
+  - splitting a reply into WhatsApp-style bubbles
+  - per-message fact extraction, since chat has no hangup to consolidate on
+
+WHY NOT REUSE ask_prompt.md.
+    Its second line is "You are on a live VOICE call", and a large block of it
+    exists to control a text-to-speech engine: no digits, no symbols, no
+    lists, Devanagari for pronunciation. Those rules are not neutral in chat,
+    they are actively wrong -- "10 pm" beats "दस बजे" on a screen, and a diet
+    plan without structure is unreadable. A single prompt with "if voice... if
+    chat..." branches would be wrong in both.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+
+import chat_session
+import llm_client
+import memory_facts
+
+# Per-message-type budgets. A single global word cap cannot survive into chat:
+# an acknowledgement and a seven-day diet plan are both legitimate replies.
+BUDGETS = {
+    "ack": 10,
+    "question": 25,
+    "explain": 60,
+    "advice": 90,
+    "plan": 0,          # 0 = unbounded; a plan is a document, not a message
+}
+
+MAX_BUBBLES = int(os.getenv("CHAT_MAX_BUBBLES", "3"))
+CHAT_MAX_TOKENS = int(os.getenv("CHAT_MAX_TOKENS", "700"))
+
+
+def _prompt_template() -> str:
+    return Path(__file__).with_name("chat_prompt.md").read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------- extraction --
+_EXTRACT_SYSTEM = """\
+You read ONE chat message from a dietician's client and pull out durable facts.
+You never speak to the user. Return JSON only:
+
+{"extracted": {"<schema path>": "<value>"}}
+
+Rules:
+  - Use ONLY paths from the list below. Never invent one.
+  - Only what the user ACTUALLY said in this message. Never infer, never
+    carry over from earlier, never guess.
+  - Durable facts only. "I ate poha today" is an event, not memory.
+    "I eat poha most mornings" is memory.
+  - Never extract a medical fact unless the user stated it plainly about
+    themselves.
+  - An empty object is the correct answer for most messages. Say nothing
+    rather than something weak.
+
+ALLOWED PATHS
+"""
+
+
+async def extract_facts(user_text: str) -> dict:
+    """Cheap per-message extraction into the session's pending buffer.
+
+    This is what gives Mira memory WITHIN a conversation. Without it she would
+    know nothing said since the last consolidation, which in chat could be
+    hours ago. Anything it returns is provisional -- the real validation
+    (evidence grounding, supersession) happens in consolidation on close.
+    """
+    if not (user_text or "").strip():
+        return {}
+    paths = "\n".join(f"  {p}" for p in sorted(memory_facts.SCHEMA))
+    data = await llm_client.complete_json(
+        _EXTRACT_SYSTEM + paths,
+        json.dumps({"user_said": user_text}, ensure_ascii=False),
+        kind="fast", max_tokens=400, temperature=0.0, timeout=8.0)
+    out = {}
+    for k, v in (data.get("extracted") or {}).items():
+        if k in memory_facts.SCHEMA and str(v).strip():
+            out[k] = v
+    return out
+
+
+# ----------------------------------------------------------- summarisation --
+_SUMMARY_SYSTEM = """\
+You keep a running summary of a chat between a dietician (Mira) and her client.
+Given the previous summary and the messages that have just scrolled out of
+view, return an updated summary.
+
+Return JSON only: {"summary": "<text>"}
+
+  - Under 120 words. This is a memory aid, not a transcript.
+  - Keep: what the user asked about, what was advised, anything unresolved.
+  - Drop: pleasantries, and anything already captured as a durable fact.
+  - Write it as continuous prose, in the third person.
+"""
+
+
+async def update_rolling_summary(previous: str, dropped_messages) -> str:
+    """Compress what has fallen out of the verbatim window.
+
+    A call's history is bounded at ~30 turns. A chat's is not, so something
+    has to give: either the window grows without limit, or the tail is
+    compressed. This is the compression.
+    """
+    if not dropped_messages:
+        return previous
+    body = "\n".join(
+        f"{'User' if m['role'] == 'user' else 'Mira'}: {m['text']}"
+        for m in dropped_messages)
+    data = await llm_client.complete_json(
+        _SUMMARY_SYSTEM,
+        json.dumps({"previous_summary": previous, "new_messages": body},
+                   ensure_ascii=False),
+        kind="fast", max_tokens=400, temperature=0.2, timeout=10.0)
+    return str(data.get("summary") or previous).strip()
+
+
+# ------------------------------------------------------- context assembly --
+def build_system_prompt(session, user_context: str, directive: str,
+                        retrieved_block: str = "") -> str:
+    """Assemble the system message: stable content first, volatile last.
+
+    The ordering is not cosmetic. A cache matches a stable PREFIX, so anything
+    that changes per turn has to sit at the end or it invalidates everything
+    after it -- the exact mistake that made the onboarding prompt uncacheable.
+    """
+    parts = [_prompt_template().replace("{{user_context}}", user_context)]
+
+    if session.rolling_summary:
+        parts.append("## Earlier in this conversation\n" + session.rolling_summary)
+
+    loops = (session.memory or {}).get("open_loops") or []
+    if loops:
+        parts.append("## Still open from before\n"
+                     + "\n".join(f"- {l}" for l in loops[:5]))
+
+    last = (session.memory or {}).get("last_session_summary") or ""
+    if last and not session.rolling_summary:
+        parts.append("## Last time you spoke\n" + last)
+
+    if session.pending_facts:
+        parts.append("## Learned in this conversation\n"
+                     + "\n".join(f"- {k}: {v}"
+                                 for k, v in session.pending_facts.items()))
+
+    if retrieved_block:
+        parts.append(retrieved_block)
+
+    if directive:
+        parts.append("## For this reply\n" + directive)
+
+    return "\n\n".join(parts)
+
+
+# --------------------------------------------------------- reply shaping --
+_SENT_SPLIT = re.compile(r"(?<=[।.!?])\s+")
+
+
+def split_bubbles(text: str, max_bubbles: int = MAX_BUBBLES):
+    """One 60-word paragraph reads as a form letter; the same words in two or
+    three bubbles read as someone thinking. Split on sentence boundaries only
+    -- never mid-thought, which reads as a glitch rather than a pause.
+
+    A plan is left whole: chopping a structured document into bubbles destroys
+    the structure that makes it readable.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if "\n" in text or len(text) > 600:          # structured / long: keep whole
+        return [text]
+    sents = [s.strip() for s in _SENT_SPLIT.split(text) if s.strip()]
+    if len(sents) <= 1:
+        return [text]
+
+    # Aim for roughly even bubbles rather than one long and one short.
+    n = min(max_bubbles, len(sents))
+    per = max(1, len(sents) // n)
+    out, cur = [], []
+    for s in sents:
+        cur.append(s)
+        if len(cur) >= per and len(out) < n - 1:
+            out.append(" ".join(cur))
+            cur = []
+    if cur:
+        out.append(" ".join(cur))
+    return [b for b in out if b]
+
+
+def typing_delay(text: str) -> float:
+    """Seconds to show 'typing…' before a bubble.
+
+    An instant reply to a hard question reads as machine even when the answer
+    is right; a short pause reads as care. Floored so it never flickers,
+    capped so it never feels broken.
+    """
+    return max(0.9, min(6.0, len(text or "") / 25.0))
+
+
+# ------------------------------------------------------------ the turn --- #
+async def _chat_completion(system: str, history, max_tokens: int) -> str:
+    """One prose reply. Uses the same provider selection as everything else."""
+    import httpx
+    msgs = [{"role": m["role"], "content": m["content"]} for m in history]
+    if llm_client.provider() == "bedrock":
+        model = llm_client.bedrock_model("chat")
+        body = llm_client.anthropic_body(system, msgs, max_tokens, 0.7)
+        async with httpx.AsyncClient(timeout=45.0) as c:
+            r = await c.post(llm_client._bedrock_url(model),
+                             headers=llm_client.bedrock_headers(), json=body)
+            r.raise_for_status()
+            data = r.json()
+        return "".join(b.get("text", "") for b in data.get("content", [])).strip()
+
+    from groq import AsyncGroq
+    client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
+    resp = await client.chat.completions.create(
+        model=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        messages=[{"role": "system", "content": system}] + msgs,
+        temperature=0.7, max_tokens=max_tokens,
+        reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "low"))
+    return (resp.choices[0].message.content or "").strip()
+
+
+async def handle_turn(session, user_text: str, user_context: str,
+                      log=None) -> dict:
+    """One user message in, one reply out.
+
+    Order matters. Safety is checked before anything else runs, and a safety
+    hit short-circuits the LLM entirely rather than asking it nicely to
+    include a fixed line -- a compliance answer that depends on the model
+    choosing to comply is not a compliance answer.
+    """
+    log = log or (lambda m: None)
+    import p3_graph
+    import rag
+
+    session.add("user", user_text)
+    session.turn_index += 1
+
+    # 1. Extract before routing, so a fact stated this turn is available to
+    #    the reply that answers it -- not one turn late.
+    try:
+        found = await extract_facts(user_text)
+        if found:
+            session.pending_facts.update(found)
+            log(f"chat extracted {list(found)} (pending {len(session.pending_facts)})")
+    except Exception as exc:
+        log(f"chat extraction failed: {type(exc).__name__}: {exc}")
+
+    # 2. The shared brain: safety, router, lane, stage, retrieval.
+    view = dict((session.memory or {}).get("long_term_memory") or {})
+    graph = p3_graph.get_graph()
+    out = await graph.ainvoke({
+        "turn_text": user_text,
+        "turn_index": session.turn_index,
+        "threads": session.threads,
+        "ledger_view": view,
+        "fact_ages": {},
+        "history": session.window()[:-1],
+        "trace": [],
+    })
+    for line in out.get("trace", []):
+        log(f"  chat graph: {line}")
+
+    # 3. Safety short-circuits. No model call, no chance to improvise.
+    if out.get("safety_hit"):
+        reply = out["safety_hit"]
+        session.add("assistant", reply)
+        log(f"chat SAFETY hit -- fixed reply, no LLM")
+        return {"bubbles": [reply], "safety": True,
+                "stage": None, "lane": "SAFETY"}
+
+    session.threads = out.get("threads", session.threads)
+
+    retrieved = out.get("retrieved") or []
+    ref = rag.format_reference(retrieved) if retrieved else ""
+
+    directive = out.get("directive") or ""
+    budget = out.get("budget") or BUDGETS["explain"]
+    if not out.get("may_advise"):
+        directive += ("\n\nYou do NOT have enough about this yet to advise. "
+                      "Ask the ONE thing you most need, and do not prescribe.")
+    directive += f"\n\nKeep this reply to about {budget} words."
+
+    system = build_system_prompt(session, user_context, directive, ref)
+    try:
+        reply = await _chat_completion(system, session.window(), CHAT_MAX_TOKENS)
+    except Exception as exc:
+        log(f"chat completion failed: {type(exc).__name__}: {exc}")
+        reply = "Ek second, kuch issue aa gaya. Dobara bhejiye?"
+
+    if not reply.strip():
+        reply = "Sorry, samajh nahi aaya. Thoda aur bata sakte ho?"
+
+    session.add("assistant", reply)
+
+    # 4. Slide the window: compress whatever fell out of view.
+    dropped = session.behind_window()
+    if dropped and len(dropped) >= 4:
+        try:
+            session.rolling_summary = await update_rolling_summary(
+                session.rolling_summary, dropped)
+            session.messages = session.messages[-HISTORY_WINDOW_KEEP:]
+            log(f"chat summary updated ({len(session.rolling_summary)} chars)")
+        except Exception as exc:
+            log(f"chat summary failed: {type(exc).__name__}: {exc}")
+
+    words = len(reply.split())
+    if budget and words > budget * 1.6:
+        log(f"chat reply over budget ({words}w, target {budget}w)")
+
+    return {"bubbles": split_bubbles(reply), "safety": False,
+            "stage": out.get("stage"), "lane": out.get("lane"),
+            "may_advise": out.get("may_advise"), "words": words}
+
+
+# Keep a little more than the verbatim window in memory, so the summariser
+# always has overlap to work from rather than a hard cut.
+HISTORY_WINDOW_KEEP = chat_session.HISTORY_WINDOW + 10
+
+
+async def close_session(session, log=None) -> dict:
+    """Run the SAME consolidation the voice call uses.
+
+    Deliberately not a chat-specific write path. Evidence grounding,
+    supersession instead of overwrite, and rejection of invented paths all
+    live inside `consolidate_patch` + `memory_facts.apply_patch`. A second
+    path would have to reproduce every one of them, and would get at least one
+    wrong.
+    """
+    log = log or (lambda m: None)
+    import consolidate
+    import memory_store
+
+    if session.closed:
+        return {"ok": False, "reason": "already closed"}
+    session.closed = True
+
+    transcript = session.transcript()
+    user_turns = sum(1 for m in session.messages if m["role"] == "user")
+    if user_turns == 0:
+        log(f"chat session {session.session_id} closed empty -- nothing to write")
+        return {"ok": True, "skipped": "no user turns"}
+
+    # Persist the raw transcript BEFORE consolidating. If the model call
+    # fails, the session is still replayable -- this is the Tier-0 rule the
+    # voice path already follows.
+    try:
+        memory_store.save_session_raw(
+            session.session_id, session.firebase_uid,
+            (session.profile or {}).get("user_id", ""), "chat",
+            transcript=transcript, turns=len(session.messages))
+    except Exception as exc:
+        log(f"chat transcript save failed: {type(exc).__name__}: {exc}")
+
+    try:
+        view = dict((session.memory or {}).get("long_term_memory") or {})
+        loops = (session.memory or {}).get("open_loops") or []
+        patch = await consolidate.consolidate_patch(view, loops, transcript)
+    except Exception as exc:
+        log(f"chat consolidation failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "reason": str(exc)[:200]}
+
+    try:
+        facts = memory_store.load_facts(session.firebase_uid)
+        new_rows, invalidated, applied = memory_facts.apply_patch(
+            facts, patch.get("ops", []), session.session_id, transcript)
+        if new_rows:
+            memory_store.append_facts(new_rows)
+        if invalidated:
+            memory_store.stamp_invalidations(invalidated, memory_facts._now())
+        merged = memory_facts.build_current_view(facts + new_rows)
+        memory_store.cache_current_view(
+            session.firebase_uid, merged, patch.get("open_loops", []),
+            patch.get("session_summary", ""), memory_facts._now(), "chat")
+        rejected = [a for a in applied if not a.get("applied")]
+        log(f"chat consolidated {session.session_id}: "
+            f"{len(new_rows)} facts, {len(invalidated)} superseded, "
+            f"{len(rejected)} rejected")
+        return {"ok": True, "facts": len(new_rows),
+                "superseded": len(invalidated), "rejected": len(rejected)}
+    except Exception as exc:
+        log(f"chat memory write failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "reason": str(exc)[:200]}

@@ -26,4 +26,6 @@ langgraph
 # Bedrock API key is a bearer token and needs no SigV4 signing.
 boto3
 
+# Loads kamya-onboarding/.env so tests/test_chat_live.py can run against
+# the real model locally without exporting variables by hand.
 python-dotenv

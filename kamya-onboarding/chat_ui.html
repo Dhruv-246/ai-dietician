@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mira — Kamya Wellness</title>
+<style>
+  :root{
+    --bar:#008069; --bar-ink:#fff;
+    --page:#EFE7DE; --in:#FFFFFF; --out:#D9FDD3;
+    --ink:#111B21; --muted:#667781; --hair:#D6D0C8;
+    --send:#008069;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;margin:0}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:var(--page);color:var(--ink);
+    display:flex;flex-direction:column;overflow:hidden;
+  }
+  /* ---------- top bar ---------- */
+  header{
+    background:var(--bar);color:var(--bar-ink);flex:none;
+    padding:calc(env(safe-area-inset-top) + 9px) 12px 9px;
+    display:flex;align-items:center;gap:11px;
+  }
+  .menu{font-size:21px;line-height:1;opacity:.95;cursor:pointer}
+  .ava{width:40px;height:40px;border-radius:50%;object-fit:cover;flex:none;
+       background:#0b6b58}
+  .who{flex:1;min-width:0}
+  .who b{display:block;font-size:16.5px;font-weight:600;line-height:1.2}
+  .who span{font-size:12.5px;opacity:.85}
+  .callwrap{display:flex;align-items:center;gap:8px;flex:none}
+  .soon{
+    font-size:10.5px;line-height:1.15;text-align:right;opacity:.9;
+    max-width:96px;
+  }
+  .callbtn{
+    width:38px;height:38px;border-radius:10px;flex:none;
+    border:1.5px solid rgba(255,255,255,.55);background:transparent;
+    display:grid;place-items:center;opacity:.65;cursor:not-allowed;
+  }
+  .callbtn svg{width:19px;height:19px;fill:#fff}
+  /* ---------- thread ---------- */
+  #thread{
+    flex:1;overflow-y:auto;padding:14px 10px 6px;
+    display:flex;flex-direction:column;gap:3px;
+  }
+  .row{display:flex;max-width:100%}
+  .row.you{justify-content:flex-end}
+  .msg{
+    max-width:82%;padding:7px 10px 6px;border-radius:9px;
+    font-size:15.2px;line-height:1.42;position:relative;
+    box-shadow:0 1px .5px rgba(11,20,26,.13);word-wrap:break-word;
+    white-space:pre-wrap;
+  }
+  .row.mira .msg{background:var(--in);border-top-left-radius:2px}
+  .row.you  .msg{background:var(--out);border-top-right-radius:2px}
+  .row + .row{margin-top:3px}
+  .row.gap{margin-top:9px}
+  .t{font-size:10.5px;color:var(--muted);float:right;margin:6px 0 -2px 9px}
+  .typing{display:flex;gap:3.5px;padding:11px 12px}
+  .typing i{width:6.5px;height:6.5px;border-radius:50%;background:#9aa5ab;
+            animation:b 1.3s infinite}
+  .typing i:nth-child(2){animation-delay:.18s}
+  .typing i:nth-child(3){animation-delay:.36s}
+  @keyframes b{0%,60%,100%{opacity:.34;transform:translateY(0)}
+               30%{opacity:1;transform:translateY(-3px)}}
+  @media (prefers-reduced-motion:reduce){.typing i{animation:none;opacity:.6}}
+  .note{
+    align-self:center;background:#FFF3C4;color:#5b4a15;font-size:12px;
+    padding:6px 11px;border-radius:7px;margin:8px 4px;text-align:center;
+    max-width:88%;
+  }
+  /* ---------- composer ---------- */
+  footer{
+    flex:none;padding:7px 8px calc(env(safe-area-inset-bottom) + 7px);
+    display:flex;gap:7px;align-items:flex-end;background:var(--page);
+  }
+  .box{
+    flex:1;background:#fff;border-radius:22px;padding:8px 14px;
+    display:flex;align-items:flex-end;box-shadow:0 1px .5px rgba(11,20,26,.13);
+  }
+  #inp{
+    flex:1;border:0;outline:0;resize:none;font:inherit;font-size:15.5px;
+    max-height:110px;line-height:1.4;background:transparent;color:var(--ink);
+  }
+  #send{
+    width:44px;height:44px;border-radius:50%;border:0;flex:none;
+    background:var(--send);display:grid;place-items:center;cursor:pointer;
+  }
+  #send:disabled{opacity:.45;cursor:default}
+  #send svg{width:20px;height:20px;fill:#fff}
+  #send:focus-visible,.callbtn:focus-visible{outline:2px solid #fff;outline-offset:2px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="menu" aria-hidden="true">&#9776;</div>
+  <img class="ava" src="/mira_avatar.jpg" alt="">
+  <div class="who">
+    <b>Mira</b>
+    <span id="status">online</span>
+  </div>
+  <div class="callwrap">
+    <div class="soon">Inbound call<br>available soon</div>
+    <button class="callbtn" disabled aria-label="Inbound call available soon">
+      <svg viewBox="0 0 24 24"><path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.2.4 2.4.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.4 0 .8-.2 1l-2.3 2.2z"/></svg>
+    </button>
+  </div>
+</header>
+
+<div id="thread" role="log" aria-live="polite"></div>
+
+<footer>
+  <div class="box"><textarea id="inp" rows="1" placeholder="Message" autocomplete="off"></textarea></div>
+  <button id="send" aria-label="Send"><svg viewBox="0 0 24 24"><path d="M2.3 20.3 21.5 12 2.3 3.7 2.3 10l13.7 2L2.3 14z"/></svg></button>
+</footer>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const UID = qs.get('uid') || '';
+const thread = document.getElementById('thread');
+const inp = document.getElementById('inp');
+const sendBtn = document.getElementById('send');
+let busy = false, lastRole = null;
+
+const clock = () => new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+
+function bubble(role, text, stamp){
+  const row = document.createElement('div');
+  row.className = 'row ' + (role === 'user' ? 'you' : 'mira') + (lastRole !== role ? ' gap' : '');
+  lastRole = role;
+  const m = document.createElement('div');
+  m.className = 'msg';
+  m.textContent = text;
+  const t = document.createElement('span');
+  t.className = 't';
+  t.textContent = stamp || clock();
+  m.appendChild(t);
+  row.appendChild(m);
+  thread.appendChild(row);
+  thread.scrollTop = thread.scrollHeight;
+  return row;
+}
+
+function notice(text){
+  const d = document.createElement('div');
+  d.className = 'note';
+  d.textContent = text;
+  thread.appendChild(d);
+  thread.scrollTop = thread.scrollHeight;
+}
+
+function typingOn(){
+  const row = document.createElement('div');
+  row.className = 'row mira gap';
+  row.id = 'typing';
+  row.innerHTML = '<div class="msg typing"><i></i><i></i><i></i></div>';
+  thread.appendChild(row);
+  thread.scrollTop = thread.scrollHeight;
+}
+const typingOff = () => document.getElementById('typing')?.remove();
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
+inp.addEventListener('input', () => {
+  inp.style.height = 'auto';
+  inp.style.height = Math.min(inp.scrollHeight, 110) + 'px';
+});
+inp.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+sendBtn.addEventListener('click', send);
+
+async function send(){
+  const text = inp.value.trim();
+  if (!text || busy) return;
+  inp.value = ''; inp.style.height = 'auto';
+  bubble('user', text);
+  busy = true; sendBtn.disabled = true;
+  document.getElementById('status').textContent = 'typing…';
+  typingOn();
+  try{
+    const r = await fetch('/chat/send', {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({uid: UID, text})
+    });
+    const data = await r.json();
+    typingOff();
+    if (!r.ok || data.error){
+      notice(data.error || 'Kuch problem aa gayi. Thodi der baad try kijiye.');
+    } else {
+      for (const b of (data.bubbles || [])){
+        typingOn();
+        await wait(Math.min(2600, Math.max(600, b.length * 22)));
+        typingOff();
+        bubble('assistant', b);
+        await wait(220);
+      }
+    }
+  } catch(err){
+    typingOff();
+    notice('Network issue. Dobara try kijiye.');
+  }
+  document.getElementById('status').textContent = 'online';
+  busy = false; sendBtn.disabled = false; inp.focus();
+}
+
+(async function boot(){
+  if (!UID){ notice('Login se aayiye — uid missing hai.'); return; }
+  try{
+    const r = await fetch('/chat/history?uid=' + encodeURIComponent(UID));
+    const d = await r.json();
+    if (d.error){ notice(d.error); sendBtn.disabled = true; inp.disabled = true; return; }
+    for (const m of (d.messages || [])) bubble(m.role, m.text, m.time);
+    if (!(d.messages || []).length){
+      bubble('assistant', d.greeting || 'Hi! Main Mira hoon. Kuch bhi poochhiye.');
+    }
+  } catch(e){ notice('History load nahi hui.'); }
+  inp.focus();
+})();
+</script>
+</body>
+</html>

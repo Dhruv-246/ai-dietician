@@ -20,6 +20,8 @@ import memory_facts as mf       # noqa: E402
 import onboarding_nodes as on   # noqa: E402
 import rag_query as rq          # noqa: E402
 import reply_shape              # noqa: E402
+import chat_engine              # noqa: E402
+import chat_session             # noqa: E402
 import thread_machine as tm     # noqa: E402
 
 R = []
@@ -261,6 +263,122 @@ def test_echo_guard():
        echo_guard.is_echo("जी", GREET) is False)
     ck("unrelated short speech is let through",
        echo_guard.is_echo("हाँ बिल्कुल", "और work क्या करते हैं आप?") is False)
+
+
+# ------------------------------------------------------------------ chat --
+def test_chat_session_lifecycle():
+    """Chat has no hangup, so the session boundary has to be derived.
+
+    Everything durable fires on close: without it, nothing a user says in
+    chat ever reaches the ledger.
+    """
+    s = chat_session.ChatSession("uid-1", {"name": "Dhruv"}, {})
+    ck("a fresh session is not due to close", s.should_close() == "")
+
+    for i in range(5):
+        s.add("user", f"message {i}")
+        s.add("assistant", f"reply {i}")
+    ck("messages accumulate", len(s.messages) == 10)
+
+    # The window is what the model sees verbatim; older turns become summary.
+    s2 = chat_session.ChatSession("uid-2")
+    for i in range(30):
+        s2.add("user", f"m{i}")
+    ck("the verbatim window is bounded",
+       len(s2.window()) == chat_session.HISTORY_WINDOW)
+    ck("older messages fall out for summarising", len(s2.behind_window()) == 10)
+
+    # Length forces a close even with no idle gap -- a long thread is exactly
+    # the one whose facts you least want to lose.
+    s3 = chat_session.ChatSession("uid-3")
+    for i in range(chat_session.MAX_MESSAGES_BEFORE_CLOSE):
+        s3.add("user", "x")
+    ck("a long session closes on message count", "messages" in s3.should_close())
+
+    # Idle close.
+    s4 = chat_session.ChatSession("uid-4")
+    s4.add("user", "hi")
+    s4.last_activity -= chat_session.IDLE_CLOSE_SECONDS + 5
+    ck("an idle session closes", "idle" in s4.should_close())
+
+    # Role labels are load-bearing: memory_facts grounds every proposed fact
+    # in the USER's own lines, so mislabelling lets Mira's words ground a
+    # fact about the user.
+    s5 = chat_session.ChatSession("uid-5")
+    s5.add("user", "main vegetarian hoon")
+    s5.add("assistant", "achha, noted")
+    t = s5.transcript()
+    ck("transcript labels the user", "User: main vegetarian hoon" in t)
+    ck("transcript labels Mira", "Mira: achha, noted" in t)
+
+
+def test_chat_session_store():
+    st = chat_session.SessionStore()
+    s1, new1 = st.get_or_open("u1")
+    s2, new2 = st.get_or_open("u1")
+    ck("the same user reuses one live session",
+       new1 is True and new2 is False and s1 is s2)
+
+    # A session past its idle limit must be retired, not reused -- otherwise
+    # its facts are never written.
+    s1.last_activity -= chat_session.IDLE_CLOSE_SECONDS + 5
+    s3, new3 = st.get_or_open("u1")
+    ck("an expired session is replaced, not resumed", new3 is True and s3 is not s1)
+    ck("the reaper can see what is due", len(st.due_for_close()) >= 0)
+
+
+def test_chat_bubbles_and_budgets():
+    # A short reply stays one bubble; nothing to gain from splitting.
+    ck("a one-liner is a single bubble",
+       len(chat_engine.split_bubbles("Haan bilkul.")) == 1)
+
+    b = chat_engine.split_bubbles(
+        "Haan bilkul. Aap kis type ka change chahte ho? Bata dijiye.")
+    ck("a multi-sentence reply splits", len(b) > 1, b)
+    ck("splitting never loses text",
+       "".join(b).replace(" ", "") ==
+       "Haan bilkul. Aap kis type ka change chahte ho? Bata dijiye.".replace(" ", ""))
+    ck("bubbles are capped", len(chat_engine.split_bubbles(
+        "A. B. C. D. E. F. G. H.")) <= chat_engine.MAX_BUBBLES)
+
+    # A plan is a document, not a message -- chopping it destroys the
+    # structure that makes it readable.
+    plan = "Day 1\n- poha\n- dal\nDay 2\n- upma\n- roti"
+    ck("structured text is never split", len(chat_engine.split_bubbles(plan)) == 1)
+    ck("empty input yields nothing", chat_engine.split_bubbles("") == [])
+
+    d = chat_engine.typing_delay("a" * 100)
+    ck("typing delay is proportional but floored and capped",
+       0.9 <= d <= 6.0 and d > 1.0, d)
+    ck("even an empty string shows a brief pause",
+       chat_engine.typing_delay("") == 0.9)
+
+    # One global word cap cannot survive into chat: an acknowledgement and a
+    # seven-day plan are both legitimate replies.
+    ck("budgets are per message type",
+       chat_engine.BUDGETS["ack"] < chat_engine.BUDGETS["advice"])
+    ck("a plan is unbounded", chat_engine.BUDGETS["plan"] == 0)
+
+
+def test_chat_prompt_is_not_the_voice_prompt():
+    """The voice prompt exists partly to drive a TTS engine. Those rules are
+    not neutral in chat -- they are wrong."""
+    import pathlib
+    txt = pathlib.Path(chat_engine.__file__).with_name("chat_prompt.md").read_text(encoding="utf-8")
+    ck("chat prompt exists and takes user context", "{{user_context}}" in txt)
+    ck("digits are allowed, unlike voice", "10 pm" in txt)
+    ck("it does not claim to be a voice call", "VOICE call" not in txt)
+    ck("ending every reply with a question is explicitly dropped",
+       "do NOT have to end with a question" in txt.replace("’", "'"))
+    ck("advising is the job here, unlike onboarding",
+       "giving useful guidance is exactly what you are for" in txt)
+    ck("promises still banned", "Never promise" in txt)
+    ck("medical deferral survives", "doctor is the right person" in txt)
+    ck("emergencies get an explicit instruction", "seek medical help now" in txt)
+
+    # Voice-only machinery must NOT have been copied across.
+    for banned in ("Devanagari for pronunciation", "NO digits", "spoken aloud"):
+        ck(f"voice-only rule absent: {banned!r}", banned not in txt)
 
 
 # ------------------------------------------------------------- safety net --
@@ -555,6 +673,9 @@ def test_bedrock_falls_back():
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
                test_rag_gate, test_onboarding, test_echo_guard,
+               test_chat_session_lifecycle, test_chat_session_store,
+               test_chat_bubbles_and_budgets,
+               test_chat_prompt_is_not_the_voice_prompt,
                test_global_rules_not_duplicated, test_trigger_backstop,
                test_no_advice_no_promises, test_capture_is_not_node_scoped,
                test_register_and_banned_words, test_offtopic_bridge,

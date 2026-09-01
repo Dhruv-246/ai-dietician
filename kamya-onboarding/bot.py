@@ -103,9 +103,12 @@ from datetime import datetime, timezone
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse)
 
 import consolidate
+import chat_engine
+import chat_session
 import llm_client
 import echo_guard
 import reply_shape
@@ -1811,6 +1814,134 @@ async def healthz():
         "bedrock_model": llm_client.bedrock_model("chat") or None,
         "aws_extra": AWSBedrockLLMService is not None,
     }
+
+
+# --------------------------------------------------------------------------- #
+# P-3 CHAT                                                                    #
+#                                                                             #
+# Same brain as the voice product -- p3_graph imports no pipecat, so safety,  #
+# router, lanes and the stage machine are shared rather than forked. What is  #
+# medium-specific (prompt, length budgets, bubbles, session lifecycle) lives  #
+# in chat_engine / chat_session.                                              #
+#                                                                             #
+# GATE: only users whose onboarding CALL is done. `onboarding_call_done` is   #
+# already set by finalize_session when an onboarding call completes, so this  #
+# is a read, not new bookkeeping.                                             #
+# --------------------------------------------------------------------------- #
+
+CHAT_GREETING = os.getenv(
+    "CHAT_GREETING",
+    "Hi! Main Mira hoon 🙂 Kuch bhi poochh sakte ho — khaane, sleep, "
+    "energy, ya apne plan ke baare mein.")
+
+CHAT_LOCKED = ("Chat abhi sirf un users ke liye hai jinki onboarding call "
+               "ho chuki hai. Call complete kijiye, phir yahin milte hain.")
+
+
+def _chat_eligible(uid: str):
+    """Returns (ok, profile, memory). Fails CLOSED on a lookup error: showing
+    chat to someone who has not onboarded is worse than a retry, because Mira
+    would have no memory of them and would open by asking what she should
+    already know."""
+    try:
+        import profile_store   # lazy, like the other call site: the server
+                               # must boot even without the sheets deps
+        profile = profile_store.load_profile_for_uid(uid) or {}
+        memory = memory_store.load_memory(uid) or {}
+    except Exception as exc:
+        _log(f"chat eligibility lookup failed uid={uid[:8]}: {exc}")
+        return False, {}, {}
+    return bool(memory.get("onboarding_call_done")), profile, memory
+
+
+@app.get("/chat", response_class=HTMLResponse)
+async def chat_page():
+    return HTMLResponse(
+        Path(__file__).with_name("chat_ui.html").read_text(encoding="utf-8"))
+
+
+@app.get("/chat/history")
+async def chat_history(uid: str = ""):
+    if not uid:
+        return JSONResponse({"error": "uid missing"}, status_code=400)
+    ok, profile, memory = _chat_eligible(uid)
+    if not ok:
+        return JSONResponse({"error": CHAT_LOCKED}, status_code=403)
+    sess = chat_session.STORE.get(uid)
+    msgs = []
+    if sess and not sess.closed:
+        msgs = [{"role": m["role"], "text": m["text"]} for m in sess.messages]
+    name = str(profile.get("name", "")).strip()
+    greet = CHAT_GREETING if not name else CHAT_GREETING.replace("Hi!", f"Hi {name}!")
+    return {"messages": msgs, "greeting": greet}
+
+
+@app.post("/chat/send")
+async def chat_send(request: Request):
+    body = await request.json()
+    uid = str((body or {}).get("uid") or "").strip()
+    text = str((body or {}).get("text") or "").strip()
+    if not uid or not text:
+        return JSONResponse({"error": "uid and text required"}, status_code=400)
+    if len(text) > 2000:
+        return JSONResponse({"error": "Message bahut lamba hai."}, status_code=400)
+
+    ok, profile, memory = _chat_eligible(uid)
+    if not ok:
+        return JSONResponse({"error": CHAT_LOCKED}, status_code=403)
+
+    # One in-flight turn per user. Two messages arriving together must not
+    # both read the same history and both append to it.
+    async with chat_session.STORE.lock(uid):
+        sess, is_new = chat_session.STORE.get_or_open(uid, profile, memory)
+        if is_new:
+            _log(f"chat session opened {sess.session_id} uid={uid[:8]}")
+        user_context = _build_user_context(profile, memory)
+        try:
+            result = await chat_engine.handle_turn(sess, text, user_context, log=_log)
+        except Exception as exc:
+            _log(f"chat turn failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
+            return JSONResponse(
+                {"error": "Kuch problem aa gayi. Dobara bhejiye?"},
+                status_code=500)
+    _log(f"chat turn uid={uid[:8]} lane={result.get('lane')} "
+         f"stage={result.get('stage')} words={result.get('words')} "
+         f"bubbles={len(result.get('bubbles') or [])}")
+    return {"bubbles": result.get("bubbles") or [], "safety": result.get("safety")}
+
+
+@app.get("/chat/sessions")
+async def chat_sessions():
+    """What is open right now. Diagnostics only -- no message content."""
+    return {"sessions": [s.to_dict() for _, s in chat_session.STORE.all()]}
+
+
+async def _chat_reaper():
+    """Close idle sessions so their facts get written.
+
+    This is the piece a voice call gets for free: hangup fires consolidation.
+    Chat has no hangup, so without this loop nothing a user says in chat ever
+    reaches the ledger.
+    """
+    while True:
+        try:
+            for uid, sess, reason in chat_session.STORE.due_for_close():
+                _log(f"chat closing {sess.session_id} uid={uid[:8]} ({reason})")
+                try:
+                    res = await chat_engine.close_session(sess, log=_log)
+                    _log(f"chat closed {sess.session_id}: {res}")
+                except Exception as exc:
+                    _log(f"chat close failed {sess.session_id}: "
+                         f"{type(exc).__name__}: {exc}")
+                chat_session.STORE.drop(uid)
+        except Exception as exc:
+            _log(f"chat reaper error: {type(exc).__name__}: {exc}")
+        await asyncio.sleep(60)
+
+
+@app.on_event("startup")
+async def _start_chat_reaper():
+    asyncio.create_task(_chat_reaper())
 
 
 @app.get("/events")
