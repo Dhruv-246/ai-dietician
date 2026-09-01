@@ -363,6 +363,44 @@ def test_chat_bubbles_and_budgets():
     ck("a plan is unbounded", chat_engine.BUDGETS["plan"] == 0)
 
 
+def test_chat_has_a_semantic_safety_backstop():
+    """Chat shipped with REGEX-ONLY safety. That is the bug this guards.
+
+    Live thread, 2026-09-01: "mujhe pichle saal se thyroid hai" matched no
+    pattern, so Mira asked which medicine he takes with no deferral to a
+    doctor at all. MEDICAL requires a NUMBER after the condition, so a plainly
+    stated condition never matches. P-2 gained a semantic backstop after
+    "heart attack" slipped through; P-3 never got one.
+    """
+    # These are real disclosures the pattern list cannot see. Keep them here
+    # so the gap stays visible rather than being assumed closed.
+    for text in ("mujhe pichle saal se thyroid hai",
+                 "mujhe BP ki problem hai",
+                 "main depression ki medicine leta hoon",
+                 "doctor ne operation bola hai"):
+        ck(f"regex alone misses: {text[:34]}", on.check_global_trigger(text) is None)
+
+    import inspect
+    src = inspect.getsource(chat_engine)
+    ck("chat asks the model for a trigger category", '"trigger": null|' in src)
+    ck("a condition needs no number to count as medical",
+       "needs no number" in src)
+    ck("ambiguity resolves toward MEDICAL",
+       "When unsure between null and MEDICAL, choose MEDICAL" in src)
+    ck("a semantic hit still yields the SCRIPTED response",
+       "trigger_response(read[" in src)
+    ck("the backstop only fires when the regex did not",
+       'not out.get("safety_hit") and read.get("trigger")' in src)
+    ck("it is logged so a regex gap is visible",
+       "regex missed it" in src)
+
+    # DEFLECT must NOT be honoured here: refusing to advise is P-2's job and
+    # exactly wrong for the product whose purpose is advising.
+    import p3_graph
+    ck("DEFLECT is not a P-3 trigger", "DEFLECT" not in p3_graph.P3_HARD_TRIGGERS)
+    ck("EMERGENCY is hard in P-3", "EMERGENCY" in p3_graph.P3_HARD_TRIGGERS)
+
+
 def test_chat_fact_merge():
     """A list path must ACCUMULATE. dict.update() silently drops all but the last.
 
@@ -759,6 +797,7 @@ def main():
                test_rag_gate, test_onboarding, test_echo_guard,
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
+               test_chat_has_a_semantic_safety_backstop,
                test_chat_bubble_edges, test_emergency_outranks_medical,
                test_chat_prompt_is_not_the_voice_prompt,
                test_global_rules_not_duplicated, test_trigger_backstop,

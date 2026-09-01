@@ -52,12 +52,28 @@ def _prompt_template() -> str:
 
 # --------------------------------------------------------------- extraction --
 _EXTRACT_SYSTEM = """\
-You read ONE chat message from a dietician's client and pull out durable facts.
-You never speak to the user. Return JSON only:
+You read ONE chat message from a dietician's client. You never speak to the
+user. Return JSON only:
 
-{"extracted": {"<schema path>": "<value>"}}
+{"extracted": {"<schema path>": "<value>"},
+ "trigger": null|"EMERGENCY"|"MEDICAL"|"PRICING"|"MIRA_IDENTITY"|"SENSITIVE"}
 
-Rules:
+TRIGGER — set it whenever the message belongs to that category, however it is
+phrased. A pattern list only catches wordings someone thought of in advance;
+you are the layer that catches the rest.
+  EMERGENCY      happening RIGHT NOW and needs help immediately: chest pain,
+                 cannot breathe, fainting, heavy bleeding, self-harm.
+  MEDICAL        any condition, diagnosis, symptom, medication, test result
+                 or procedure the user reports about themselves. "mujhe
+                 thyroid hai", "BP ki problem hai", "depression ki medicine
+                 leta hoon", "doctor ne operation bola" are ALL medical.
+                 A condition needs no number and no doctor mentioned.
+  PRICING        cost, fees, plans, what is free or paid.
+  MIRA_IDENTITY  whether you are human, AI, a bot.
+  SENSITIVE      shame, body image, what people will think.
+When unsure between null and MEDICAL, choose MEDICAL.
+
+EXTRACTED rules:
   - Use ONLY paths from the list below. Never invent one.
   - Only what the user ACTUALLY said in this message. Never infer, never
     carry over from earlier, never guess.
@@ -105,26 +121,47 @@ def merge_facts(pending: dict, found: dict) -> dict:
     return out
 
 
-async def extract_facts(user_text: str) -> dict:
-    """Cheap per-message extraction into the session's pending buffer.
+async def read_message(user_text: str) -> dict:
+    """One cheap call per message: durable facts AND a safety category.
 
-    This is what gives Mira memory WITHIN a conversation. Without it she would
-    know nothing said since the last consolidation, which in chat could be
-    hours ago. Anything it returns is provisional -- the real validation
-    (evidence grounding, supersession) happens in consolidation on close.
+    The category matters as much as the facts. Chat reached production with
+    REGEX-ONLY safety -- p3_graph matches patterns and stops there. On a live
+    thread "mujhe pichle saal se thyroid hai" produced no trigger at all and
+    Mira simply asked which medicine he takes, with no deferral to a doctor.
+    The same list misses "BP ki problem hai", "depression ki medicine leta
+    hoon" and "doctor ne operation bola hai", because MEDICAL requires a
+    NUMBER after the condition.
+
+    P-2 gained this backstop after "heart attack" slipped through; P-3 never
+    got it. Folding it into the extraction call means no extra round trip.
+
+    The extraction half is what gives Mira memory WITHIN a conversation --
+    without it she would know nothing said since the last consolidation, which
+    in chat could be hours ago. Anything it returns is provisional; the real
+    validation (evidence grounding, supersession) happens on session close.
+
+    Returns {"extracted": {...}, "trigger": name-or-None}.
     """
     if not (user_text or "").strip():
-        return {}
+        return {"extracted": {}, "trigger": None}
     paths = "\n".join(f"  {p}" for p in sorted(memory_facts.SCHEMA))
     data = await llm_client.complete_json(
-        _EXTRACT_SYSTEM + paths,
+        _EXTRACT_SYSTEM + "\nALLOWED PATHS\n" + paths,
         json.dumps({"user_said": user_text}, ensure_ascii=False),
         kind="fast", max_tokens=400, temperature=0.0, timeout=8.0)
     out = {}
     for k, v in (data.get("extracted") or {}).items():
         if k in memory_facts.SCHEMA and str(v).strip():
             out[k] = v
-    return out
+
+    import p3_graph
+    trig = str(data.get("trigger") or "").strip().upper() or None
+    # Only categories P-3 actually honours. DEFLECT and WHAT_NEXT are
+    # onboarding artefacts -- refusing to advise is the whole point of P-2 and
+    # exactly wrong here.
+    if trig not in (p3_graph.P3_HARD_TRIGGERS | p3_graph.P3_SOFT_TRIGGERS):
+        trig = None
+    return {"extracted": out, "trigger": trig}
 
 
 # ----------------------------------------------------------- summarisation --
@@ -319,14 +356,16 @@ async def handle_turn(session, user_text: str, user_context: str,
 
     # 1. Extract before routing, so a fact stated this turn is available to
     #    the reply that answers it -- not one turn late.
+    read = {"extracted": {}, "trigger": None}
     try:
-        found = await extract_facts(user_text)
+        read = await read_message(user_text)
+        found = read.get("extracted") or {}
         if found:
             # merge_facts, not update: a list path must accumulate. See above.
             session.pending_facts = merge_facts(session.pending_facts, found)
             log(f"chat extracted {list(found)} (pending {len(session.pending_facts)})")
     except Exception as exc:
-        log(f"chat extraction failed: {type(exc).__name__}: {exc}")
+        log(f"chat read failed: {type(exc).__name__}: {exc}")
 
     # 2. The shared brain: safety, router, lane, stage, retrieval.
     view = dict((session.memory or {}).get("long_term_memory") or {})
@@ -344,6 +383,15 @@ async def handle_turn(session, user_text: str, user_context: str,
         log(f"  chat graph: {line}")
 
     # 3. Safety short-circuits. No model call, no chance to improvise.
+    #    The graph's regex runs first; the semantic read backs it up for the
+    #    phrasings no pattern list anticipated.
+    if not out.get("safety_hit") and read.get("trigger"):
+        import onboarding_nodes
+        scripted = onboarding_nodes.trigger_response(read["trigger"])
+        if scripted and read["trigger"] in p3_graph.P3_HARD_TRIGGERS:
+            log(f"chat SEMANTIC trigger {read['trigger']} (regex missed it)")
+            out["safety_hit"] = scripted
+
     if out.get("safety_hit"):
         reply = out["safety_hit"]
         session.add("assistant", reply)
