@@ -781,6 +781,29 @@ def test_chat_survives_a_restart():
     ck("the store is optional", chat_store.enabled() in (True, False))
 
 
+def test_chat_ui_has_a_working_logout():
+    """The burger was decorative -- aria-hidden, no handler, no way out."""
+    import pathlib
+    ui = pathlib.Path(chat_engine.__file__).with_name("chat_ui.html").read_text(encoding="utf-8")
+    ck("the burger is a real button now", 'id="menuBtn"' in ui
+       and 'class="menu" aria-hidden' not in ui)
+    ck("there is a log out item", 'id="logoutBtn"' in ui and "Log out" in ui)
+    ck("the login URL is injected, not hardcoded twice", "{{LOGIN_URL}}" in ui)
+    ck("logging out replaces history rather than pushing",
+       "location.replace(LOGIN_URL)" in ui)   # back button must not return
+    ck("session storage is cleared on the way out", "sessionStorage.clear()" in ui)
+    ck("a click anywhere closes the menu", 'id="scrim"' in ui)
+    ck("escape closes it too", "e.key === 'Escape'" in ui)
+    ck("the button reports its state", "aria-expanded" in ui)
+
+    import pathlib as _p
+    bot = _p.Path(chat_engine.__file__).with_name('bot.py').read_text(encoding='utf-8')
+    ck('LOGIN_URL derives from WEB_APP_URL -- one source of truth',
+       'WEB_APP_URL.rstrip("/") + "/login"' in bot)
+    ck('and the placeholder is substituted when serving the page',
+       'html.replace("{{LOGIN_URL}}", LOGIN_URL)' in bot)
+
+
 def test_chat_ui_queues_instead_of_dropping():
     """A message typed while Mira replied was silently discarded."""
     import pathlib
@@ -1200,6 +1223,7 @@ def main():
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
                test_chat_survives_a_restart,
+               test_chat_ui_has_a_working_logout,
                test_chat_ui_queues_instead_of_dropping,
                test_chat_bubble_edges, test_emergency_outranks_medical,
                test_chat_prompt_is_not_the_voice_prompt,

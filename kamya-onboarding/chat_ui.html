@@ -24,7 +24,24 @@
     padding:calc(env(safe-area-inset-top) + 9px) 12px 9px;
     display:flex;align-items:center;gap:11px;
   }
-  .menu{font-size:21px;line-height:1;opacity:.95;cursor:pointer}
+  .menu{font-size:21px;line-height:1;opacity:.95;cursor:pointer;
+        background:none;border:0;color:inherit;padding:2px 4px}
+  .menu:focus-visible{outline:2px solid #fff;outline-offset:2px}
+  /* Click-away layer. Full-screen so a tap anywhere closes the menu, which is
+     what people expect and what avoids a menu stuck open behind the thread. */
+  .scrim{position:fixed;inset:0;z-index:20;background:transparent;border:0}
+  .sheet{
+    position:absolute;top:calc(env(safe-area-inset-top) + 52px);left:8px;
+    z-index:21;background:#fff;border-radius:8px;min-width:172px;
+    box-shadow:0 3px 14px rgba(11,20,26,.26);overflow:hidden;
+  }
+  .sheet button{
+    display:block;width:100%;text-align:left;background:none;border:0;
+    font:inherit;font-size:15px;padding:13px 16px;cursor:pointer;color:#111B21;
+  }
+  .sheet button:hover,.sheet button:focus-visible{background:#F0F2F5;outline:none}
+  .sheet .danger{color:#B4402F}
+  [hidden]{display:none !important}
   .ava{width:40px;height:40px;border-radius:50%;object-fit:cover;flex:none;
        background:#0b6b58}
   .who{flex:1;min-width:0}
@@ -97,7 +114,8 @@
 <body>
 
 <header>
-  <div class="menu" aria-hidden="true">&#9776;</div>
+  <button class="menu" id="menuBtn" aria-label="Menu"
+          aria-haspopup="true" aria-expanded="false">&#9776;</button>
   <img class="ava" src="/mira_avatar.jpg" alt="">
   <div class="who">
     <b>Mira</b>
@@ -111,6 +129,11 @@
   </div>
 </header>
 
+<button class="scrim" id="scrim" hidden aria-label="Close menu"></button>
+<div class="sheet" id="sheet" hidden role="menu">
+  <button id="logoutBtn" class="danger" role="menuitem">Log out</button>
+</div>
+
 <div id="thread" role="log" aria-live="polite"></div>
 
 <footer>
@@ -119,6 +142,7 @@
 </footer>
 
 <script>
+const LOGIN_URL = "{{LOGIN_URL}}";
 const qs = new URLSearchParams(location.search);
 const UID = qs.get('uid') || '';
 const thread = document.getElementById('thread');
@@ -167,6 +191,29 @@ function typingOn(){
 }
 const typingOff = () => document.getElementById('typing')?.remove();
 const wait = ms => new Promise(r => setTimeout(r, ms));
+
+// ---- burger menu ----
+const menuBtn = document.getElementById('menuBtn');
+const sheet = document.getElementById('sheet');
+const scrim = document.getElementById('scrim');
+
+function menu(open){
+  sheet.hidden = !open;
+  scrim.hidden = !open;
+  menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) document.getElementById('logoutBtn').focus();
+}
+menuBtn.addEventListener('click', () => menu(sheet.hidden));
+scrim.addEventListener('click', () => menu(false));
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !sheet.hidden){ menu(false); menuBtn.focus(); }
+});
+document.getElementById('logoutBtn').addEventListener('click', () => {
+  // Leave the uid behind. Nothing sensitive is cached client-side, but the
+  // next person on this device must not land in someone else's thread.
+  try { sessionStorage.clear(); } catch (e) {}
+  location.replace(LOGIN_URL);
+});
 
 inp.addEventListener('input', () => {
   inp.style.height = 'auto';

@@ -1874,10 +1874,15 @@ def _chat_eligible(uid: str):
     return bool(memory.get("onboarding_call_done")), profile, memory
 
 
+# Where "Log out" goes. Derived from WEB_APP_URL so there is one source of
+# truth -- the chat page must not hardcode a second copy that drifts.
+LOGIN_URL = os.getenv("LOGIN_URL", WEB_APP_URL.rstrip("/") + "/login")
+
+
 @app.get("/chat", response_class=HTMLResponse)
 async def chat_page():
-    return HTMLResponse(
-        Path(__file__).with_name("chat_ui.html").read_text(encoding="utf-8"))
+    html = Path(__file__).with_name("chat_ui.html").read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("{{LOGIN_URL}}", LOGIN_URL))
 
 
 @app.get("/chat/history")
