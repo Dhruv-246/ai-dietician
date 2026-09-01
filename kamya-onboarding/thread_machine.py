@@ -680,21 +680,36 @@ def quick_directive(situation="", active=None, explicit_advice_request=False):
     d = ("Answer the user's question directly and briefly. "
          "Do not start a consultation and do not interrogate them.")
     if situation == "OFF_TOPIC":
-        # SHORT. She answered an IPL schedule question in 31 words and gave
-        # phone troubleshooting steps -- friendly, but a dietician who does
-        # tech support is nobody's dietician. One line, warmly, and let it go.
-        d = ("This is outside what you do. Answer in ONE short line if you "
-             "genuinely know, or say lightly that it is not your area — then "
-             "let it go.\n"
+        # TWO BEATS, always: answer it, then say warmly what you are here for.
+        #
+        # The distinction that matters -- and it is a fine one. Naming your
+        # purpose is a person setting a boundary. Demanding they pick from a
+        # list is an IVR. The first is what we want; the second is what she
+        # kept doing ("Paris hai. Ab weakness, digestion, ya neend?").
+        #
+        # The answer half stays SHORT. She gave 31 words on the IPL calendar
+        # and five troubleshooting steps for a slow phone -- friendly, but a
+        # dietician who does tech support is nobody's dietician.
+        d = ("This is outside what you do. Reply in TWO short beats:\n"
+             "  1. ANSWER it in one line if you genuinely know, or say lightly "
+             "that you do not.\n"
+             "  2. Then, warmly, say that you are here for their food and "
+             "health, and that they can ask you anything about that. Say it "
+             "as an OFFER, never as a demand.\n"
+             "Keep the whole thing to about two sentences.\n"
              "Do NOT give a detailed answer, a list of steps, or advice about "
-             "it. Do NOT lecture about what you can and cannot help with. Do "
-             "NOT swing into their health topic in the same breath unless they "
-             "raise it — an answer followed by 'ab batao, weakness ya "
-             "digestion?' is the form-like habit we are removing.\n"
-             'GOOD: "Haha, wo mujhe nahi pata 🙂"\n'
-             'GOOD: "Paris. Aur sunao?"\n'
+             "the off-topic thing. Do NOT lecture about your limitations. Do "
+             "NOT list health topics for them to choose from, and do NOT ask "
+             "which problem they want to discuss — naming your purpose is "
+             "warm, handing them a menu is not.\n"
+             'GOOD: "Ji waise toh iska answer Paris hai 🙂 Par main yahan '
+             'aapki diet aur health ke liye hoon — us bare mein kuch bhi '
+             'poochh sakte ho."\n'
+             'GOOD: "Haha, wo mujhe nahi pata. Khaane-peene ka kuch ho toh '
+             'zaroor bataiye."\n'
              'BAD:  "Paris hai. Ab aapke weakness, digestion, ya neend mein '
-             'se kaunsa issue sabse zyada pareshan kar raha hai?"')
+             'se kaunsa issue sabse zyada pareshan kar raha hai?"  '
+             "— that is a menu, not an offer.")
     elif situation == "CORRECTION":
         d = ("The user is correcting you. Accept it immediately and warmly. "
              "Do NOT defend or explain what you said before. Then carry on.")

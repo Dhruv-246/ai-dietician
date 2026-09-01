@@ -755,12 +755,23 @@ def test_off_topic_is_answered_briefly_and_dropped():
     import thread_machine as tm
 
     d = tm.quick_directive("OFF_TOPIC", None)["directive"]
-    ck("off-topic gets ONE line", "ONE short line" in d)
+    ck("off-topic answers in two beats", "TWO short beats" in d)
+    ck("the answer half stays one line", "in one line" in d)
     ck("no step-by-step answers", "list of steps" in d)
-    ck("it does not lecture about scope", "cannot help with" in d)
-    ck("and does not pivot to health in the same breath",
-       "unless they raise it" in d.lower())
-    ck("the real failing reply is the BAD example", "Paris hai" in d)
+    ck("it does not lecture about limitations", "lecture about your limitations" in d)
+
+    # The fine distinction: naming your purpose is a boundary; handing them a
+    # list is an IVR. She kept doing the second -- "Paris hai. Ab weakness,
+    # digestion, ya neend?" -- so the offer is required and the menu banned in
+    # the same breath.
+    ck("she offers what she IS for", "as an OFFER" in d)
+    ck("but never as a demand", "never as a demand" in d)
+    ck("and never as a list of health topics", "list health topics" in d)
+    ck("nor by asking which problem to discuss", "which problem they want" in d)
+    ck("the wanted shape is the GOOD example",
+       "main yahan aapki diet aur health ke liye hoon" in d)
+    ck("the real failing reply is the BAD example",
+       "Paris hai" in d and "that is a menu, not an offer" in d)
 
     # The menu ban must sit on BOTH return paths -- banning it in one place
     # moved it, exactly as banning it per stage did.
