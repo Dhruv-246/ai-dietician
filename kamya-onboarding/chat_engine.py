@@ -438,6 +438,15 @@ async def handle_turn(session, user_text: str, user_context: str,
     if budget and words > budget * 1.6:
         log(f"chat reply over budget ({words}w, target {budget}w)")
 
+    # 5. Persist. AFTER the reply is composed, so a slow or failing store can
+    #    never delay the user's message -- worst case the turn is lost on a
+    #    restart, which is exactly today's behaviour rather than a regression.
+    try:
+        import chat_store
+        await chat_store.save(session, log=log)
+    except Exception as exc:
+        log(f"chat persist failed: {type(exc).__name__}: {exc}")
+
     return {"bubbles": split_bubbles(reply), "safety": False,
             "stage": out.get("stage"), "lane": out.get("lane"),
             "may_advise": out.get("may_advise"), "words": words}
@@ -464,6 +473,11 @@ async def close_session(session, log=None) -> dict:
     if session.closed:
         return {"ok": False, "reason": "already closed"}
     session.closed = True
+    try:
+        import chat_store
+        await chat_store.mark_closed(session.firebase_uid, log=log)
+    except Exception:
+        pass
 
     transcript = session.transcript()
     user_turns = sum(1 for m in session.messages if m["role"] == "user")

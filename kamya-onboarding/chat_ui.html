@@ -125,6 +125,10 @@ const thread = document.getElementById('thread');
 const inp = document.getElementById('inp');
 const sendBtn = document.getElementById('send');
 let busy = false, lastRole = null;
+// Messages typed while Mira is still replying. They used to be DROPPED --
+// send() returned early on `busy` and the text simply never went anywhere.
+// On WhatsApp you can always send; the reply just arrives after.
+const outbox = [];
 
 const clock = () => new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
 
@@ -175,10 +179,15 @@ sendBtn.addEventListener('click', send);
 
 async function send(){
   const text = inp.value.trim();
-  if (!text || busy) return;
+  if (!text) return;
   inp.value = ''; inp.style.height = 'auto';
-  bubble('user', text);
-  busy = true; sendBtn.disabled = true;
+  bubble('user', text);          // show it immediately, queued or not
+  if (busy){ outbox.push(text); return; }
+  await deliver(text);
+}
+
+async function deliver(text){
+  busy = true;
   document.getElementById('status').textContent = 'typing…';
   typingOn();
   try{
@@ -205,6 +214,9 @@ async function send(){
   }
   document.getElementById('status').textContent = 'online';
   busy = false; sendBtn.disabled = false; inp.focus();
+
+  // Anything typed while she was replying goes now, in order.
+  if (outbox.length) await deliver(outbox.shift());
 }
 
 (async function boot(){

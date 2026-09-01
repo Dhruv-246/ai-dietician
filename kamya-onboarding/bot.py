@@ -110,6 +110,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 import consolidate
 import chat_engine
 import chat_session
+import chat_store
 import llm_client
 import echo_guard
 import reply_shape
@@ -1889,6 +1890,14 @@ async def chat_history(uid: str = ""):
     msgs = []
     if sess and not sess.closed:
         msgs = [{"role": m["role"], "text": m["text"]} for m in sess.messages]
+    else:
+        # Nothing in memory does not mean nothing happened -- the process may
+        # simply have restarted. Show the stored thread rather than an empty
+        # screen that implies the conversation never took place.
+        row = await chat_store.load(uid, log=_log)
+        if row and not row.get("closed"):
+            msgs = [{"role": m.get("role"), "text": m.get("text")}
+                    for m in (row.get("messages") or []) if m.get("text")]
     name = str(profile.get("name", "")).strip()
     greet = CHAT_GREETING if not name else CHAT_GREETING.replace("Hi!", f"Hi {name}!")
     return {"messages": msgs, "greeting": greet}
@@ -1913,7 +1922,18 @@ async def chat_send(request: Request):
     async with chat_session.STORE.lock(uid):
         sess, is_new = chat_session.STORE.get_or_open(uid, profile, memory)
         if is_new:
-            _log(f"chat session opened {sess.session_id} uid={uid[:8]}")
+            # A restart empties the in-memory store, so before treating this
+            # as a brand-new conversation, check whether the user already has
+            # an open one on disk. Without this the thread silently restarts
+            # and everything extracted since the last consolidation is lost.
+            row = await chat_store.load(uid, log=_log)
+            if row and not row.get("closed"):
+                chat_store.restore(sess, row)
+                _log(f"chat session RESTORED {sess.session_id} uid={uid[:8]} "
+                     f"({len(sess.messages)} messages, "
+                     f"{len(sess.pending_facts)} pending facts)")
+            else:
+                _log(f"chat session opened {sess.session_id} uid={uid[:8]}")
         user_context = _build_user_context(profile, memory)
         try:
             result = await chat_engine.handle_turn(sess, text, user_context, log=_log)
@@ -1941,8 +1961,27 @@ async def _chat_reaper():
     Chat has no hangup, so without this loop nothing a user says in chat ever
     reaches the ledger.
     """
+    first_pass = True
     while True:
         try:
+            # After a restart, sessions exist on disk that this process has
+            # never seen. They will never idle-close on their own, so their
+            # facts are not merely delayed -- they are never written. Adopt
+            # them once at startup.
+            if first_pass:
+                first_pass = False
+                try:
+                    for row in await chat_store.open_sessions(log=_log):
+                        ruid = row.get("firebase_uid")
+                        if not ruid or chat_session.STORE.get(ruid):
+                            continue
+                        s = chat_session.STORE.open(ruid)
+                        chat_store.restore(s, row)
+                        _log(f"chat adopted orphaned session {s.session_id} "
+                             f"uid={ruid[:8]} ({len(s.messages)} messages)")
+                except Exception as exc:
+                    _log(f"chat adopt failed: {type(exc).__name__}: {exc}")
+
             for uid, sess, reason in chat_session.STORE.due_for_close():
                 _log(f"chat closing {sess.session_id} uid={uid[:8]} ({reason})")
                 try:

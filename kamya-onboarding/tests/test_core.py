@@ -22,6 +22,7 @@ import rag_query as rq          # noqa: E402
 import reply_shape              # noqa: E402
 import chat_engine              # noqa: E402
 import chat_session             # noqa: E402
+import chat_store               # noqa: E402
 import thread_machine as tm     # noqa: E402
 
 R = []
@@ -399,6 +400,70 @@ def test_chat_has_a_semantic_safety_backstop():
     import p3_graph
     ck("DEFLECT is not a P-3 trigger", "DEFLECT" not in p3_graph.P3_HARD_TRIGGERS)
     ck("EMERGENCY is hard in P-3", "EMERGENCY" in p3_graph.P3_HARD_TRIGGERS)
+
+
+def test_chat_survives_a_restart():
+    """A deploy used to take the live conversation with it.
+
+    Worse than losing the screen: an in-memory session that dies is never
+    CLOSED, so consolidation never runs for it. Everything extracted since the
+    last close was not delayed, it was lost -- and on chat that window is 45
+    minutes wide.
+    """
+    import thread_machine as tm
+
+    s = chat_session.ChatSession("uid-restart", {"name": "Dhruv"}, {})
+    s.add("user", "mujhe thyroid hai")
+    s.add("assistant", "noted")
+    s.rolling_summary = "talked about thyroid"
+    s.pending_facts = {"health.conditions": ["thyroid"]}
+    s.threads = [tm.Thread(topic="thyroid", stage=tm.S_GATHER, stage_turns=2,
+                           slots={"a": "1"})]
+
+    # What the store would write, round-tripped as JSON does.
+    row = {
+        "session_id": s.session_id, "started_at": s.started_at,
+        "last_activity": s.last_activity, "messages": s.messages,
+        "rolling_summary": s.rolling_summary,
+        "pending_facts": s.pending_facts,
+        "threads": chat_store._threads_to_json(s.threads), "closed": False,
+    }
+    ck("threads serialise to plain JSON",
+       isinstance(row["threads"], list) and row["threads"][0]["topic"] == "thyroid")
+
+    fresh = chat_session.ChatSession("uid-restart")
+    chat_store.restore(fresh, row)
+    ck("messages survive", len(fresh.messages) == 2)
+    ck("the session id is kept, not regenerated",
+       fresh.session_id == s.session_id)
+    ck("pending facts survive -- this is the data that was being lost",
+       fresh.pending_facts == {"health.conditions": ["thyroid"]})
+    ck("the rolling summary survives", fresh.rolling_summary == "talked about thyroid")
+    ck("thread state survives",
+       len(fresh.threads) == 1 and fresh.threads[0].stage == tm.S_GATHER
+       and fresh.threads[0].stage_turns == 2, fresh.threads)
+    ck("turn_index is rebuilt from the user turns", fresh.turn_index == 1)
+
+    # Degradation must be graceful: no Supabase means today's behaviour, not
+    # a broken conversation.
+    ck("restore(None) is a no-op", chat_store.restore(fresh, None) is fresh)
+    ck("a thread row the code cannot parse is skipped, not fatal",
+       chat_store._threads_from_json([{"nonsense": 1}]) == [])
+    ck("the store is optional", chat_store.enabled() in (True, False))
+
+
+def test_chat_ui_queues_instead_of_dropping():
+    """A message typed while Mira replied was silently discarded."""
+    import pathlib
+    ui = pathlib.Path(chat_engine.__file__).with_name("chat_ui.html").read_text(encoding="utf-8")
+    ck("there is an outbox", "const outbox = []" in ui)
+    ck("a busy send is queued, not dropped", "outbox.push(text)" in ui)
+    ck("the queue drains after the reply", "outbox.shift()" in ui)
+    ck("the message appears immediately either way",
+       ui.index("bubble('user', text)") < ui.index("if (busy){"))
+    # Disabling the composer while she typed is what made it feel broken.
+    ck("the composer is not disabled mid-reply",
+       ui.count("sendBtn.disabled = true") == 1)   # only the eligibility gate
 
 
 def test_chat_fact_merge():
@@ -798,6 +863,8 @@ def main():
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
                test_chat_has_a_semantic_safety_backstop,
+               test_chat_survives_a_restart,
+               test_chat_ui_queues_instead_of_dropping,
                test_chat_bubble_edges, test_emergency_outranks_medical,
                test_chat_prompt_is_not_the_voice_prompt,
                test_global_rules_not_duplicated, test_trigger_backstop,
