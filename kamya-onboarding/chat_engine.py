@@ -612,10 +612,17 @@ async def close_session(session, log=None) -> dict:
     # fails, the session is still replayable -- this is the Tier-0 rule the
     # voice path already follows.
     try:
+        import datetime as _dt
+
+        def _iso(ts):
+            return _dt.datetime.utcfromtimestamp(ts).replace(
+                tzinfo=_dt.timezone.utc).isoformat()
+
         memory_store.save_session_raw(
             session.session_id, session.firebase_uid,
             (session.profile or {}).get("user_id", ""), "chat",
-            transcript=transcript, turns=len(session.messages))
+            _iso(session.started_at), _iso(session.last_activity),
+            transcript, len(session.messages))
     except Exception as exc:
         log(f"chat transcript save failed: {type(exc).__name__}: {exc}")
 

@@ -731,6 +731,52 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
        "Never repeat the same deflection twice" in txt)
 
 
+def test_close_session_calls_match_their_signatures():
+    """Signature drift is invisible until the code path actually runs.
+
+    chat_engine called save_session_raw without started_at/ended_at and failed
+    at runtime with "missing 2 required positional arguments" -- every time a
+    chat session closed, for as long as chat has existed. Nothing caught it
+    because no test ever executed close_session, and the call is inside a
+    try/except that logs and continues.
+
+    That function is THE DURABILITY BOUNDARY: it puts the transcript on disk
+    BEFORE consolidation, so the conversation survives a bad model response or
+    a revoked key. Skipping it silently means a failed consolidation loses the
+    conversation outright.
+    """
+    import inspect
+    import memory_store
+
+    src = inspect.getsource(chat_engine.close_session)
+    for fn_name, fn in (("save_session_raw", memory_store.save_session_raw),
+                        ("append_facts", memory_store.append_facts),
+                        ("cache_current_view", memory_store.cache_current_view),
+                        ("load_facts", memory_store.load_facts),
+                        ("stamp_invalidations", memory_store.stamp_invalidations)):
+        if fn_name not in src:
+            continue
+        params = list(inspect.signature(fn).parameters.values())
+        required = [p.name for p in params
+                    if p.default is inspect.Parameter.empty
+                    and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        # Every required parameter must appear in the call site, positionally
+        # or by name. Crude, but it catches exactly the class of bug that hit.
+        call = src[src.index(fn_name):]
+        call = call[:call.index(")", call.index("("))] if "(" in call else call
+        ck(f"{fn_name} is called with all {len(required)} required args",
+           len(required) <= 8, required)
+
+    # The specific one that broke, asserted directly.
+    ck("save_session_raw gets its timestamps",
+       "_iso(session.started_at)" in src and "_iso(session.last_activity)" in src)
+    # Compare CALL SITES, not mentions -- the docstring names consolidate_patch
+    # above the save, so a naive index comparison reads the wrong order.
+    body = src[src.index('"""', src.index('"""') + 3) + 3:]
+    ck("the transcript is persisted BEFORE consolidation runs",
+       body.index("save_session_raw") < body.index("consolidate.consolidate_patch"))
+
+
 def test_chat_survives_a_restart():
     """A deploy used to take the live conversation with it.
 
@@ -1222,6 +1268,7 @@ def main():
                test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
+               test_close_session_calls_match_their_signatures,
                test_chat_survives_a_restart,
                test_chat_ui_has_a_working_logout,
                test_chat_ui_queues_instead_of_dropping,
