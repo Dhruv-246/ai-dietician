@@ -275,7 +275,23 @@ async def probe(rounds: int = 3) -> dict:
                 r.raise_for_status()
                 r.json()
         except Exception as exc:
-            ok, err = False, f"{type(exc).__name__}: {exc}"[:200]
+            ok = False
+            # CAPTURE THE BODY, not just the status. AWS returns 403 for
+            # several unrelated reasons and the code alone cannot tell them
+            # apart -- an expired key, a revoked key, a key that is fine but
+            # lacks access to this model, and a suspended account all look
+            # identical from outside. The body names the exception type, which
+            # points at completely different fixes.
+            body = ""
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                try:
+                    body = json.dumps(resp.json())[:300]
+                except Exception:
+                    body = (getattr(resp, "text", "") or "")[:300]
+            err = f"{type(exc).__name__}: {exc}"[:160]
+            if body:
+                err += f" | body={body}"
         out.append({"ms": round((time.perf_counter() - t0) * 1000), "ok": ok,
                     **({"error": err} if err else {})})
     return {"model": model, "region": _region(), "rounds": out}
