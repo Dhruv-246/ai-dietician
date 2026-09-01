@@ -482,7 +482,8 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
 
     import pathlib
     txt = pathlib.Path(chat_engine.__file__).with_name("chat_prompt.md").read_text(encoding="utf-8")
-    ck("the prompt tells her to carry the thread", "Carry the conversation" in txt)
+    ck("the prompt still guards against dead ends",
+       "Keep the thread alive" in txt and "dead end" in txt)
     ck("a vague complaint is framed as an invitation",
        "invitation, not a problem" in txt)
     ck("repeating a deflection is banned",
