@@ -123,6 +123,13 @@ order and stop at the first that matches.
    Wait for the actual complaint. "mujhe weakness ho rahi hai" is a PROBLEM;
    "mujhe kuch baat karni thi" is not, however much it sounds like a preface.
 
+   A PROBLEM must also be something a DIETICIAN can act on -- food, eating,
+   digestion, energy, sleep, weight, habits, cravings. A problem outside that
+   is OFF_TOPIC, however sincerely it is asked. "shaadi kab karni chahiye?"
+   opened a thread called 'marriage timing' with six probes; there is nothing
+   she can do with it and the thread then pulls every later reply toward a
+   consultation that should never have started.
+
 3. ADVANCE — the turn belongs to the active thread. This is the DEFAULT
    whenever a thread is active and the turn relates to it in any way.
    Includes ALL of these:

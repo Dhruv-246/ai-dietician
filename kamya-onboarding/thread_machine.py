@@ -680,8 +680,21 @@ def quick_directive(situation="", active=None, explicit_advice_request=False):
     d = ("Answer the user's question directly and briefly. "
          "Do not start a consultation and do not interrogate them.")
     if situation == "OFF_TOPIC":
-        d = ("Answer briefly and warmly, then steer back to what you were "
-             "discussing. Do not lecture about what you can or cannot help with.")
+        # SHORT. She answered an IPL schedule question in 31 words and gave
+        # phone troubleshooting steps -- friendly, but a dietician who does
+        # tech support is nobody's dietician. One line, warmly, and let it go.
+        d = ("This is outside what you do. Answer in ONE short line if you "
+             "genuinely know, or say lightly that it is not your area — then "
+             "let it go.\n"
+             "Do NOT give a detailed answer, a list of steps, or advice about "
+             "it. Do NOT lecture about what you can and cannot help with. Do "
+             "NOT swing into their health topic in the same breath unless they "
+             "raise it — an answer followed by 'ab batao, weakness ya "
+             "digestion?' is the form-like habit we are removing.\n"
+             'GOOD: "Haha, wo mujhe nahi pata 🙂"\n'
+             'GOOD: "Paris. Aur sunao?"\n'
+             'BAD:  "Paris hai. Ab aapke weakness, digestion, ya neend mein '
+             'se kaunsa issue sabse zyada pareshan kar raha hai?"')
     elif situation == "CORRECTION":
         d = ("The user is correcting you. Accept it immediately and warmly. "
              "Do NOT defend or explain what you said before. Then carry on.")
@@ -725,7 +738,12 @@ def quick_directive(situation="", active=None, explicit_advice_request=False):
                   "breath. Exactly one question.")
         else:
             d += " Then steer back to what you were discussing, without a question."
-    d += f" Keep it under {BUDGET_QUICK} words."
+    # The menu ban lives on BOTH return paths. It was added to stage_directive
+    # only, and the failure promptly reappeared through QUICK: "Paris hai."
+    # followed by "weakness, digestion, ya neend?". Banning it in one place
+    # moves it, exactly as banning it per stage did.
+    d += (" Never present the user with a list of options to choose from."
+          f" Keep it under {BUDGET_QUICK} words.")
     return {"directive": d, "budget": BUDGET_QUICK, "may_advise": not gated}
 
 

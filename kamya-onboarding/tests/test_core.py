@@ -742,6 +742,42 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
        "Never repeat the same deflection twice" in txt)
 
 
+def test_off_topic_is_answered_briefly_and_dropped():
+    """Something outside her remit gets one line, not a consultation.
+
+    Live, 2026-09-02: "IPL ka final kab hai?" produced 31 words on the cricket
+    calendar, and "mera phone slow chal raha hai" produced troubleshooting
+    steps. Friendly, but a dietician who does tech support is nobody's
+    dietician. "capital of france kya hai" got "Paris hai." followed by
+    "weakness, digestion, ya neend?" -- a menu, through QUICK, because the
+    global ban had only been added to stage_directive.
+    """
+    import thread_machine as tm
+
+    d = tm.quick_directive("OFF_TOPIC", None)["directive"]
+    ck("off-topic gets ONE line", "ONE short line" in d)
+    ck("no step-by-step answers", "list of steps" in d)
+    ck("it does not lecture about scope", "cannot help with" in d)
+    ck("and does not pivot to health in the same breath",
+       "unless they raise it" in d.lower())
+    ck("the real failing reply is the BAD example", "Paris hai" in d)
+
+    # The menu ban must sit on BOTH return paths -- banning it in one place
+    # moved it, exactly as banning it per stage did.
+    for sit in ("OFF_TOPIC", "SOCIAL", "FACTUAL", "MEMORY_QUERY", "CORRECTION"):
+        q = tm.quick_directive(sit, None)["directive"]
+        ck(f"QUICK/{sit} bans menus",
+           "list of options" in q or "list of topics" in q)
+
+    # A problem must be one she can actually act on.
+    import p3_graph, inspect
+    r = inspect.getsource(p3_graph)
+    ck("a PROBLEM must be actionable by a dietician",
+       "something a DIETICIAN can act on" in r)
+    ck("the marriage-timing thread is named as the failure",
+       "marriage timing" in r)
+
+
 def test_no_menus_anywhere():
     """A menu is the most machine-like thing she does, and it kept moving.
 
@@ -1409,6 +1445,7 @@ def main():
                test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
+               test_off_topic_is_answered_briefly_and_dropped,
                test_no_menus_anywhere,
                test_social_turns_are_not_steered_back,
                test_conversation_falls_back_like_the_small_jobs_do,
