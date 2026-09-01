@@ -443,7 +443,18 @@ def _node_lane(state: ConvState) -> ConvState:
         for path, val in mapped.items():
             active.slots[path] = val
         for key, val in extra.items():
-            active.slots[key] = val
+            # ACCUMULATE, do not overwrite. The router names these keys itself,
+            # and it reuses the same one ("adhoc_symptom") for every new
+            # detail about the same complaint. Assigning straight to the key
+            # meant the thread remembered exactly ONE thing, forever.
+            #
+            # Live chat, 2026-09-01: the user said "bhukh nahi lg rahi", then
+            # "raat mein hi dikkat", then "dinner hi nahi kha pata" -- three
+            # distinct facts. All three landed on adhoc_symptom, each erasing
+            # the last, so by ADVISE the thread knew only the most recent
+            # phrasing and had lost that he cannot eat dinner. His words:
+            # "it is not understanding the problem."
+            tm.add_adhoc_slot(active, key, val)
         if mapped or extra:
             trace.append(f"extracted -> {list(mapped) or list(extra)}")
         if lane in (tm.LANE_ADVANCE, tm.LANE_RESUME):

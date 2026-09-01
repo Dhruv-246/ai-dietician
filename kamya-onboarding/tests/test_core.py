@@ -408,6 +408,77 @@ def test_chat_has_a_semantic_safety_backstop():
     ck("EMERGENCY is hard in P-3", "EMERGENCY" in p3_graph.P3_HARD_TRIGGERS)
 
 
+def test_thread_accumulates_problem_details():
+    """A thread must remember every detail, not just the latest phrasing.
+
+    Live chat 2026-09-01: the user said "bhukh nahi lg rahi", then "raat mein
+    hi dikkat", then "dinner hi nahi kha pata". The router names its own slot
+    keys and reused "adhoc_symptom" for all three, and the write was a plain
+    assignment -- so each erased the last. By ADVISE the thread had lost that
+    he could not eat dinner. His words: "it is not understanding the problem".
+    """
+    import thread_machine as tm
+    t = tm.Thread(topic="appetite")
+
+    tm.add_adhoc_slot(t, "adhoc_symptom", "no appetite")
+    tm.add_adhoc_slot(t, "adhoc_symptom", "no appetite at night")
+    ck("a fuller version of the same fact replaces it",
+       list(t.slots.values()) == ["no appetite at night"], t.slots)
+
+    tm.add_adhoc_slot(t, "adhoc_symptom", "cannot eat dinner")
+    ck("a genuinely NEW fact is kept alongside", len(t.slots) == 2, t.slots)
+    ck("both details survive",
+       set(t.slots.values()) == {"no appetite at night", "cannot eat dinner"})
+
+    tm.add_adhoc_slot(t, "adhoc_symptom", "no appetite at night")
+    ck("repeating a known detail changes nothing", len(t.slots) == 2)
+    tm.add_adhoc_slot(t, "adhoc_symptom", "")
+    ck("an empty detail is ignored", len(t.slots) == 2)
+
+    for i in range(12):
+        tm.add_adhoc_slot(t, "adhoc_symptom", f"distinct detail {i}")
+    ck("accumulation is bounded", len(t.slots) <= 8, len(t.slots))
+
+
+def test_memory_prefill_is_not_understanding():
+    """Slots filled FROM MEMORY must not count as having understood a problem.
+
+    The router planned three paths; two were already on file, so a single
+    answer emptied `missing` and the thread ran UNDERSTAND -> ADVISE in four
+    turns without ever asking when, since when, or which meals.
+    """
+    import thread_machine as tm
+    t = tm.Thread(topic="p", needed_paths=["a", "b", "c"])
+    tm.prefill(t, {"known": {"a": "from ledger", "b": "from ledger"}})
+    ck("prefilled paths are recorded", set(t.prefilled) == {"a", "b"})
+    ck("nothing is credited as learned yet", tm.learned_here(t) == [])
+
+    t.slots["c"] = "user said this"
+    ck("only the user's answer counts", tm.learned_here(t) == ["c"])
+
+    g = {"known": dict(t.slots), "missing": [], "stale": []}
+    one = tm.Thread(topic="p", stage=tm.S_GATHER, slots=dict(t.slots),
+                    prefilled=list(t.prefilled))
+    ck("one answer is not enough to leave GATHER",
+       tm.next_stage(one, g, False) == tm.S_GATHER)
+
+    t.slots["d"] = "and this"
+    g2 = {"known": dict(t.slots), "missing": [], "stale": []}
+    two = tm.Thread(topic="p", stage=tm.S_GATHER, slots=dict(t.slots),
+                    prefilled=list(t.prefilled))
+    ck("two answers move it on", tm.next_stage(two, g2, False) != tm.S_GATHER)
+
+    # The anti-stall paths must still work, or a thread could deadlock.
+    stalled = tm.Thread(topic="p", stage=tm.S_GATHER, stage_turns=9)
+    ck("the dwell clock still force-advances",
+       tm.next_stage(stalled, {"known": {"x": 1}, "missing": ["y"], "stale": []},
+                     False) != tm.S_GATHER)
+    ck("the model's own 'sufficient' still advances",
+       tm.next_stage(tm.Thread(topic="p", stage=tm.S_GATHER),
+                     {"known": {"x": 1}, "missing": ["y"], "stale": []},
+                     True) != tm.S_GATHER)
+
+
 def test_small_talk_gets_small_talk():
     """"hi" must not be answered with an agenda.
 
@@ -951,6 +1022,8 @@ def main():
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
                test_chat_has_a_semantic_safety_backstop,
+               test_thread_accumulates_problem_details,
+               test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
                test_chat_survives_a_restart,

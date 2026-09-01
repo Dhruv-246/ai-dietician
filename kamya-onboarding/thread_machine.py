@@ -16,6 +16,7 @@ A THREAD, NOT THE CONVERSATION.
     that do not — a factual aside, a joke — take the QUICK lane and the thread
     does not move. That is what stops this feeling like a questionnaire.
 """
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -117,6 +118,7 @@ class Thread:
     adhoc: list = field(default_factory=list)          # thread-only, never a typed fact
     slots: dict = field(default_factory=dict)          # path/adhoc -> value
     asked: list = field(default_factory=list)          # what we have already asked for
+    prefilled: list = field(default_factory=list)      # filled FROM MEMORY, not asked
     reflected: bool = False
     advice: list = field(default_factory=list)
     parked: bool = False
@@ -298,10 +300,67 @@ def _read_path(view, path):
 
 
 def prefill(thread, gather):
-    """Copy known ledger values into the thread's slots. Never asks."""
+    """Copy known ledger values into the thread's slots. Never asks.
+
+    RECORDS what came from memory. Without that record the machine cannot tell
+    "I know this because they just told me" from "I know this because it was
+    already on file", and it treats both as gathering progress -- see
+    learned_here().
+    """
     for path, val in (gather.get("known") or {}).items():
+        if path not in thread.slots:
+            thread.prefilled.append(path)
         thread.slots.setdefault(path, val)
     return thread
+
+
+# How many things the user must actually TELL us before a problem thread is
+# allowed to call itself understood. Two, because one is a label rather than
+# an understanding: "no appetite" names the complaint without establishing
+# when, since when, or what changed.
+MIN_LEARNED_HERE = int(os.getenv("P3_MIN_LEARNED", "2"))
+
+
+def add_adhoc_slot(thread, key, value, cap=6):
+    """Record a thread-only detail WITHOUT erasing the previous one.
+
+    The router picks these key names and happily reuses one key for every new
+    detail about the same complaint, so a plain assignment makes the thread
+    amnesiac: it holds the latest phrasing and nothing else.
+
+    A genuine refinement of the same fact ("no appetite" -> "no appetite at
+    night") should replace; a NEW fact ("cannot eat dinner") must be kept
+    alongside. The test is containment -- if one string contains the other,
+    it is the same fact restated.
+    """
+    value = str(value).strip()
+    if not value:
+        return thread
+    low = value.lower()
+    for k, v in list(thread.slots.items()):
+        if not k.startswith("adhoc"):
+            continue
+        ex = str(v).strip().lower()
+        if ex == low or ex in low:
+            thread.slots[k] = value        # a fuller version of the same fact
+            return thread
+        if low in ex:
+            return thread                  # we already know more than this
+    if key in thread.slots:                # same key, genuinely new fact
+        n = sum(1 for k in thread.slots if k.startswith(key))
+        if n >= cap:
+            return thread
+        key = f"{key}_{n + 1}"
+    thread.slots[key] = value
+    return thread
+
+
+def learned_here(thread):
+    """Slots the USER filled in this thread, excluding anything prefilled
+    from memory."""
+    pre = set(thread.prefilled or [])
+    return [p for p, v in (thread.slots or {}).items()
+            if p not in pre and str(v).strip()]
 
 
 # -------------------------------------------------------------- advance ----
@@ -325,17 +384,31 @@ def next_stage(thread, gather, sufficient):
     st = thread.stage
     dwelled = thread.stage_turns >= DWELL.get(st, 1)
 
+    # A plan whose slots were filled FROM MEMORY is not a problem we have
+    # understood -- it is a problem we have labelled. Live chat, 2026-09-01:
+    # the user said "bhukh nahi lg rahi", the router planned three paths, two
+    # were already on file (dinner time, sleep time), so ONE answer emptied
+    # `missing` and the thread went UNDERSTAND -> GATHER -> REFLECT -> ADVISE
+    # in four turns. It never asked when, since when, or which meals. By
+    # ADVISE it still did not know the problem, so it asked a menu question
+    # instead -- the user's words: "it is not understanding the problem".
+    #
+    # So an empty `missing` only counts when the user actually told us
+    # something. `sufficient` (the model's own judgement) and `dwelled` (the
+    # anti-stall clock) still advance regardless, so this cannot deadlock.
+    enough_learned = len(learned_here(thread)) >= MIN_LEARNED_HERE
+
     if st == S_UNDERSTAND:
         # Skip GATHER when nothing is genuinely missing, or when the user's
         # opening message alone was enough to act on. NOTE: `stale` does NOT
         # force a gather turn — a slightly out-of-date fact is worth confirming
         # inside another sentence, never worth spending a whole turn asking for.
-        if sufficient or not gather["missing"]:
+        if sufficient or (not gather["missing"] and enough_learned):
             return S_REFLECT if has_reflectable(gather) else S_ADVISE
         return S_GATHER
 
     if st == S_GATHER:
-        if sufficient or not gather["missing"] or dwelled:
+        if sufficient or (not gather["missing"] and enough_learned) or dwelled:
             # Force-advanced with nothing learned (two sideways answers, say):
             # skip the reflection and work with what we have rather than
             # narrating our own ignorance back at them.
