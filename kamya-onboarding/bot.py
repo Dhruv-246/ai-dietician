@@ -32,6 +32,7 @@ import traceback
 import uuid
 from collections import deque
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -1725,12 +1726,29 @@ WEB_APP_URL = os.getenv("WEB_APP_URL", "https://web-production-45f0d.up.railway.
 @app.get("/")
 @app.get("/call")
 async def call_ui(request: Request):
-    """The call screen — only shown when arriving from onboarding (has ?uid=).
+    """Landing after login. Which screen you get depends on where you are.
 
-    Without a uid, redirect to the web app so the user signs in / onboards first.
+    Onboarding not done  -> the CALL screen. The onboarding call is the only
+                            way memory gets seeded, so it has to come first.
+    Onboarding done      -> the CHAT screen. Chat is the ongoing product now;
+                            inbound call is marked "available soon" there.
+
+    Without a uid, back to the web app to sign in.
+
+    Override with ?screen=call to force the call UI even once onboarding is
+    done -- the ongoing voice call still works and this keeps it reachable
+    for testing without a redeploy.
     """
-    if not request.query_params.get("uid"):
+    uid = request.query_params.get("uid")
+    if not uid:
         return RedirectResponse(WEB_APP_URL)
+
+    if request.query_params.get("screen") != "call":
+        ok, _profile, _memory = _chat_eligible(uid)
+        if ok:
+            qs = f"?uid={quote(uid)}"
+            return RedirectResponse(f"/chat{qs}")
+
     return HTMLResponse((_HERE / "call_ui.html").read_text(encoding="utf-8"))
 
 
