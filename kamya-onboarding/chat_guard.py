@@ -29,6 +29,14 @@ import re
 
 GUARD_ENABLED = os.getenv("CHAT_GUARD", "1") != "0"
 
+# Used when a reply consisted ENTIRELY of something she must not say. Says
+# nothing false, hands the specifics to the people who actually know, and
+# leaves the conversation open.
+SAFE_SUBSTITUTE = os.getenv(
+    "CHAT_SAFE_SUBSTITUTE",
+    "Us bare mein Kamya team aapko sahi bata payegi. "
+    "Khaane ya health ka kuch poochna ho toh main yahan hoon 🙂")
+
 # ------------------------------------------------------- off-topic offer ---
 # She must ANSWER, then say warmly what she is for. Naming your purpose is a
 # person setting a boundary; handing over a list of topics is an IVR. These
@@ -89,8 +97,154 @@ def strip_markdown(text: str) -> str:
     return out
 
 
+# ---------------------------------------------------------------- menus ----
+# "Kya dikkat hai — weakness, digestion, ya neend?" The single most persistent
+# failure in this product: banned in the prompt three separate times, and each
+# time it reappeared on whichever code path lacked the ban.
+#
+# Rewritten rather than blocked, and conservatively: the option list is cut and
+# the question stem kept. "Kya dikkat hai?" is a real question and a strictly
+# better one -- it lets them answer in their own words, which is what the
+# stage machine wanted in the first place.
+_MENU_TAIL = re.compile(
+    r"\s*[—–\-:(]\s*"                       # the dash/colon/paren that opens it
+    r"[^—–\-:()?]{0,40}?,"                   # first option, then a comma
+    r"[^?()]{0,60}?"                          # more options
+    r"\b(ya|या|or)\b"                        # the giveaway
+    r"[^?()]{0,40}\)?"                        # last option
+    r"(?=\s*\?)",                            # immediately before the "?"
+    re.I)
+
+# "(low, normal, high)" -- same failure without the dash.
+_MENU_PARENS = re.compile(r"\s*\([^()?]{0,60}?,[^()?]{0,60}?\)", re.I)
+
+
+def has_menu(text: str) -> bool:
+    return bool(_MENU_TAIL.search(text or "") or _MENU_PARENS.search(text or ""))
+
+
+def strip_menu(text: str) -> str:
+    """Cut the option list, keep the question."""
+    out = _MENU_TAIL.sub("", text or "")
+    out = _MENU_PARENS.sub("", out)
+    return re.sub(r"\s{2,}", " ", out).strip()
+
+
+# -------------------------------------------------------------- promises ---
+# "hum aapka personalized plan banayenge. kal ya parso message aayega."
+# She cannot commit the team to anything, and a written promise is screenshot
+# and held against you weeks later.
+_PROMISE = re.compile(
+    r"[^.!?\n]*\b("
+    r"kal\s+(tak|se)?\s*(bhej|mil|aa)|parso|kal\s+message|"
+    r"bhej\s*(dungi|doongi|denge|dunga)|"
+    r"plan\s+(bana\s*denge|ready\s+ho|bhej)|"
+    r"promise\s+karti|guarantee|"
+    r"team\s+(call\s+karegi|contact\s+karegi)"
+    r")[^.!?\n]*[.!?]?", re.I)
+
+
+def strip_promises(text: str):
+    """Remove any sentence that commits to a deliverable or a date."""
+    out, n = _PROMISE.subn("", text or "")
+    return re.sub(r"\s{2,}", " ", out).strip(), n
+
+
+# ---------------------------------------------------------------- gender ---
+# Mira is a woman; the user may not be. Both directions have failed live:
+# "samajh sakta hoon" (her, masculine) and "skip kar rahi ho" (to a man).
+_HER_MASC = [
+    (re.compile(r"\b(sakta)\s+(hoon|hun)\b", re.I), r"sakti \2"),
+    (re.compile(r"\b(samajhta|karta|dekhta|bolta|deta|leta|rehta)\s+(hoon|hun)\b", re.I),
+     lambda m: m.group(1)[:-1] + "i " + m.group(2)),
+    (re.compile(r"\b(karunga|poochhunga|bataunga|dekhunga|hoonga)\b", re.I),
+     lambda m: m.group(1).replace("unga", "ungi").replace("oonga", "oongi")),
+    (re.compile(r"(सकता|समझता|करता|देखता|रहता)(\s+हूँ)"),
+     lambda m: m.group(1)[:-1] + "ी" + m.group(2)),
+]
+# Feminine verbs aimed at the USER. Only corrected when we know they are male.
+_YOU_FEM = re.compile(r"\b(rahi|karti|khati|leti|soti|hoti)\s+ho\b", re.I)
+_FEM_TO_MASC = {"rahi": "rahe", "karti": "karte", "khati": "khate",
+                "leti": "lete", "soti": "sote", "hoti": "hote"}
+
+
+def fix_gender(text: str, user_gender: str = "") -> tuple:
+    """Her verbs feminine; the user's matching THEIR gender."""
+    out, n = text or "", 0
+    for pat, rep in _HER_MASC:
+        out, k = pat.subn(rep, out)
+        n += k
+    if (user_gender or "").strip().lower() in ("male", "m", "man", "पुरुष"):
+        def _m(mo):
+            return _FEM_TO_MASC.get(mo.group(1).lower(), mo.group(1)) + " ho"
+        out, k = _YOU_FEM.subn(_m, out)
+        n += k
+    return out, n
+
+
+# ------------------------------------------------------------ banned words --
+# "समझी"/"samjhi" is the most repetitive-sounding habit on a call and slipped
+# past the prompt twice in one conversation.
+_SAMJHI = re.compile(r"^\s*(जी\s*)?(समझ\s*गई|समझी|समझा|samajh\s*gayi|samjhi)\s*[.!,]?\s*",
+                     re.I)
+# The prompt allows at most one emoji; more reads as trying too hard.
+_EMOJI = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+
+
+def trim_openers(text: str) -> str:
+    return _SAMJHI.sub("", text or "", count=1).strip() or (text or "")
+
+
+def cap_emoji(text: str, limit: int = 1) -> str:
+    found = _EMOJI.findall(text or "")
+    if len(found) <= limit:
+        return text
+    out, kept = [], 0
+    for ch in text:
+        if _EMOJI.match(ch):
+            kept += 1
+            if kept > limit:
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
+# ------------------------------------------------------- Kamya invention ---
+# "Kamya team ke behind mein actual nutritionists hain" -- a claim about the
+# business she has no way of knowing and which may simply be false.
+_KAMYA_CLAIM = re.compile(
+    r"[^.!?\n]*\bkamya\b[^.!?\n]*\b("
+    r"nutritionists?|doctors?|dietici|experts?|team\s+mein\s+\d|"
+    r"certified|qualified|years?\s+of\s+experience"
+    r")[^.!?\n]*[.!?]?", re.I)
+
+
+def strip_kamya_claims(text: str):
+    out, n = _KAMYA_CLAIM.subn("", text or "")
+    return re.sub(r"\s{2,}", " ", out).strip(), n
+
+
+# --------------------------------------------------------------- counters --
+# COUNT, never block. These are quality signals: a rising rate means the
+# PROMPT is slipping and the fix belongs there, not in a harder rewrite.
+_HEDGE = re.compile(
+    r"(kya agar|agar aap.{0,40}toh.{0,20}(sakta|sakti|karega|hoga)|"
+    r"madad karega\?|kaam karega\?|theek rahega\?|would that help)", re.I)
+
+
+def quality_flags(text: str, budget: int = 0) -> dict:
+    words = len((text or "").split())
+    return {
+        "words": words,
+        "over_budget": bool(budget) and words > budget * 1.6,
+        "hedged": bool(_HEDGE.search(text or "")),
+        "questions": (text or "").count("?"),
+    }
+
+
 # ------------------------------------------------------------------ apply --
-def apply(reply: str, *, situation: str = "", log=None) -> str:
+def apply(reply: str, *, situation: str = "", user_gender: str = "",
+          budget: int = 0, log=None) -> str:
     """Run every guardrail over one reply. Returns the reply to send.
 
     Never raises: a guardrail that breaks a conversation has failed worse than
@@ -99,17 +253,78 @@ def apply(reply: str, *, situation: str = "", log=None) -> str:
     log = log or (lambda m: None)
     if not GUARD_ENABLED or not reply:
         return reply
+    original = reply
     try:
-        before = reply
-        reply = strip_markdown(reply)
-        if reply != before:
-            log("chat guard: stripped markdown")
+        sit = (situation or "").upper()
+        hits = []
 
-        if (situation or "").upper() == "OFF_TOPIC" and needs_scope_offer(reply):
+        # ---- REWRITE: wrong, but not unsafe -------------------------------
+        step = strip_markdown(reply)
+        if step != reply:
+            hits.append("markdown")
+        reply = step
+
+        if has_menu(reply):
+            stripped = strip_menu(reply)
+            # Only accept the rewrite if a real question survives it.
+            if len(stripped) > 12 and "?" in stripped:
+                reply, _ = stripped, hits.append("menu")
+
+        # These two remove things she must not say. If removing them empties
+        # the reply, the reply was ENTIRELY the thing we are removing -- so
+        # restoring the original would ship exactly what the check exists to
+        # stop. Substitute instead.
+        unsafe_removed = False
+
+        reply, n = strip_promises(reply)
+        if n:
+            hits.append(f"promise x{n}")
+            unsafe_removed = True
+
+        reply, n = fix_gender(reply, user_gender)
+        if n:
+            hits.append(f"gender x{n}")
+
+        reply, n = strip_kamya_claims(reply)
+        if n:
+            hits.append("kamya-claim")
+            unsafe_removed = True
+
+        step = trim_openers(reply)
+        if step != reply:
+            hits.append("samjhi")
+        reply = step
+
+        step = cap_emoji(reply)
+        if step != reply:
+            hits.append("emoji")
+        reply = step
+
+        # ---- APPEND: off-topic must say what she is for --------------------
+        if sit == "OFF_TOPIC" and needs_scope_offer(reply):
             reply = add_scope_offer(reply)
-            log("chat guard: added scope offer to an off-topic reply")
+            hits.append("scope-offer")
+
+        # ---- BLOCK / SUBSTITUTE: a rewrite that ate the whole reply -------
+        if not reply.strip():
+            if unsafe_removed:
+                log("chat guard: reply was ENTIRELY a promise or an invented "
+                    "claim -- substituting")
+                return SAFE_SUBSTITUTE
+            log("chat guard: rewrites emptied the reply -- keeping the original")
+            return original
+
+        # ---- COUNT: quality signals, logged only ---------------------------
+        flags = quality_flags(reply, budget)
+        noted = [k for k in ("over_budget", "hedged") if flags.get(k)]
+        if hits:
+            log(f"chat guard: {', '.join(hits)}")
+        if noted:
+            log(f"chat quality: {', '.join(noted)} ({flags['words']}w)")
         return reply
     except Exception as exc:
+        # A guardrail that breaks the conversation has failed worse than the
+        # thing it was checking for.
         log(f"chat guard failed, passing reply through: "
             f"{type(exc).__name__}: {exc}")
-        return reply
+        return original

@@ -576,7 +576,14 @@ async def handle_turn(session, user_text: str, user_context: str,
     # it. Live, three off-topic turns with an explicit directive and worked
     # examples: one followed it, two ignored it.
     import chat_guard
-    reply = chat_guard.apply(reply, situation=out.get("situation", ""), log=log)
+    reply = chat_guard.apply(
+        reply,
+        situation=out.get("situation", ""),
+        # Her verbs must be feminine; theirs must match THEIR gender. Both
+        # directions have failed live.
+        user_gender=str((session.profile or {}).get("gender", "")),
+        budget=budget,
+        log=log)
 
     session.add("assistant", reply)
 

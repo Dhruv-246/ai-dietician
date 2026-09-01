@@ -743,6 +743,86 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
        "Never repeat the same deflection twice" in txt)
 
 
+def test_guard_covers_every_observed_failure():
+    """One check per thing we actually watched break. Nothing speculative.
+
+    Severity discipline, because getting it wrong either way is its own bug:
+      BLOCK/SUBSTITUTE  the reply was ENTIRELY something she must not say
+      REWRITE           wrong but safe -- menu, promise, gender, markdown
+      COUNT             merely worse -- length, hedging
+    """
+    G = chat_guard
+
+    # MENU -- banned in the prompt three times, reappeared each time.
+    ck("menu with a dash is cut",
+       G.apply("Kya dikkat hai — weakness, digestion, ya neend?",
+               situation="PROBLEM") == "Kya dikkat hai?")
+    ck("menu in parens is cut",
+       G.apply("Energy level kaisa hai? (low, normal, high)",
+               situation="PROBLEM") == "Energy level kaisa hai?")
+    # ...but a genuine list in prose is NOT a menu.
+    prose = "Dal, roti aur dahi se protein mil jata hai."
+    ck("an ordinary list in prose is untouched",
+       G.apply(prose, situation="PROBLEM") == prose)
+
+    # PROMISE -- "kal message aayega" commits the team.
+    out = G.apply("Theek hai. Hum plan bana denge. Kal message aayega.",
+                  situation="PROBLEM")
+    ck("promises are removed", "kal" not in out.lower() and "bana denge" not in out.lower())
+    ck("the rest of the reply survives", "Theek hai" in out)
+
+    # GENDER -- both directions have failed live.
+    ck("her verbs are made feminine",
+       "sakti hoon" in G.apply("Main samajh sakta hoon.", situation="PROBLEM"))
+    ck("a male user is not feminised",
+       "rahe ho" in G.apply("Aap skip kar rahi ho?", situation="PROBLEM",
+                            user_gender="Male"))
+    ck("a female user is left alone",
+       "rahi ho" in G.apply("Aap skip kar rahi ho?", situation="PROBLEM",
+                            user_gender="Female"))
+    ck("unknown gender is left alone -- guessing misgenders someone",
+       "rahi ho" in G.apply("Aap skip kar rahi ho?", situation="PROBLEM"))
+
+    # BANNED OPENER + EMOJI
+    ck("समझी opener is trimmed",
+       G.apply("Samajh gayi. Dinner theek hai.",
+               situation="PROBLEM").startswith("Dinner"))
+    ck("emoji are capped at one",
+       len(G._EMOJI.findall(G.apply("Badhiya 😊 sach 🎉 mast 🔥",
+                                    situation="SOCIAL"))) == 1)
+
+    # INVENTED BUSINESS CLAIMS
+    out = G.apply("Kamya team mein nutritionists hain. Dinner theek hai.",
+                  situation="SOCIAL")
+    ck("claims about Kamya are removed", "nutritionists" not in out)
+    ck("and real content is kept", "Dinner theek hai" in out)
+
+    # A reply that was ENTIRELY unsafe must be SUBSTITUTED, not restored --
+    # restoring it would ship exactly what the check exists to stop.
+    only = G.apply("Kal tak plan bhej dungi.", situation="PROBLEM")
+    ck("an all-promise reply is substituted",
+       only == G.SAFE_SUBSTITUTE, only)
+    ck("the substitute promises nothing",
+       "kal" not in G.SAFE_SUBSTITUTE.lower())
+
+    # But an ordinary rewrite that empties the reply keeps the original --
+    # sending nothing is worse than sending something imperfect.
+    ck("a harmless emptying keeps the original",
+       G.apply("😊😊😊", situation="SOCIAL") is not None)
+
+    # COUNT, never block: truncating cost us the question once already.
+    f = G.quality_flags("word " * 200, budget=25)
+    ck("over-budget is counted, not cut", f["over_budget"] is True)
+    ck("hedging is counted",
+       G.quality_flags("Kya agar dinner halka rakho toh madad karega?")["hedged"])
+
+    # And the whole layer is reversible.
+    ck("one variable disables it", hasattr(G, "GUARD_ENABLED"))
+    ck("a clean reply passes through untouched",
+       G.apply("Dinner 10 pm pe kya khate ho?", situation="PROBLEM")
+       == "Dinner 10 pm pe kya khate ho?")
+
+
 def test_guard_guarantees_what_the_prompt_only_asks_for():
     """The directive requested the off-topic shape; the model obeyed 1 in 3.
 
@@ -1507,6 +1587,7 @@ def main():
                test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
+               test_guard_covers_every_observed_failure,
                test_guard_guarantees_what_the_prompt_only_asks_for,
                test_off_topic_is_answered_briefly_and_dropped,
                test_no_menus_anywhere,
