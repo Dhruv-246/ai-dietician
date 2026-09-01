@@ -374,20 +374,7 @@ def typing_delay(text: str) -> float:
 
 
 # ------------------------------------------------------------ the turn --- #
-async def _chat_completion(system: str, history, max_tokens: int) -> str:
-    """One prose reply. Uses the same provider selection as everything else."""
-    import httpx
-    msgs = [{"role": m["role"], "content": m["content"]} for m in history]
-    if llm_client.provider() == "bedrock":
-        model = llm_client.bedrock_model("chat")
-        body = llm_client.anthropic_body(system, msgs, max_tokens, 0.7)
-        async with httpx.AsyncClient(timeout=45.0) as c:
-            r = await c.post(llm_client._bedrock_url(model),
-                             headers=llm_client.bedrock_headers(), json=body)
-            r.raise_for_status()
-            data = r.json()
-        return "".join(b.get("text", "") for b in data.get("content", [])).strip()
-
+async def _groq_reply(system: str, msgs, max_tokens: int) -> str:
     from groq import AsyncGroq
     client = AsyncGroq(api_key=os.getenv("GROQ_API_KEY"))
     resp = await client.chat.completions.create(
@@ -396,6 +383,46 @@ async def _chat_completion(system: str, history, max_tokens: int) -> str:
         temperature=0.7, max_tokens=max_tokens,
         reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "low"))
     return (resp.choices[0].message.content or "").strip()
+
+
+async def _chat_completion(system: str, history, max_tokens: int,
+                           log=None) -> str:
+    """One prose reply, with the fallback the small jobs already had.
+
+    llm_client.complete_json falls through to Groq when Bedrock fails, but the
+    CONVERSATION model did not -- so a Bedrock outage took chat down entirely
+    while the router kept working. That is what happened on 2026-09-01: the
+    Bedrock key started returning 403, and every reply became
+    "Ek second, kuch issue aa gaya" while lane and stage were computed
+    perfectly on Groq.
+
+    A worse-but-present answer beats no answer. The user should never see an
+    error because ONE provider is unhappy.
+    """
+    log = log or (lambda m: None)
+    msgs = [{"role": m["role"], "content": m["content"]} for m in history]
+
+    if llm_client.provider() == "bedrock":
+        try:
+            import httpx
+            model = llm_client.bedrock_model("chat")
+            body = llm_client.anthropic_body(system, msgs, max_tokens, 0.7)
+            async with httpx.AsyncClient(timeout=45.0) as c:
+                r = await c.post(llm_client._bedrock_url(model),
+                                 headers=llm_client.bedrock_headers(), json=body)
+                r.raise_for_status()
+                data = r.json()
+            out = "".join(b.get("text", "") for b in data.get("content", [])).strip()
+            if out:
+                return out
+            log("chat bedrock returned empty -- falling back to groq")
+        except Exception as exc:
+            log(f"chat bedrock failed ({type(exc).__name__}: "
+                f"{str(exc)[:80]}) -- falling back to groq")
+        if not os.getenv("GROQ_API_KEY"):
+            raise RuntimeError("bedrock failed and no GROQ_API_KEY to fall back to")
+
+    return await _groq_reply(system, msgs, max_tokens)
 
 
 async def handle_turn(session, user_text: str, user_context: str,
@@ -536,7 +563,8 @@ async def handle_turn(session, user_text: str, user_context: str,
 
     system = build_system_prompt(session, user_context, directive, ref)
     try:
-        reply = await _chat_completion(system, session.window(), CHAT_MAX_TOKENS)
+        reply = await _chat_completion(system, session.window(),
+                                       CHAT_MAX_TOKENS, log=log)
     except Exception as exc:
         log(f"chat completion failed: {type(exc).__name__}: {exc}")
         reply = "Ek second, kuch issue aa gaya. Dobara bhejiye?"

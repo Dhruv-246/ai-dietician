@@ -731,6 +731,52 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
        "Never repeat the same deflection twice" in txt)
 
 
+def test_conversation_falls_back_like_the_small_jobs_do():
+    """A Bedrock outage must not take chat down.
+
+    llm_client.complete_json has fallen through to Groq for a while, but the
+    CONVERSATION model did not. On 2026-09-01 the Bedrock key began returning
+    403 and every reply became "Ek second, kuch issue aa gaya" -- while lane
+    and stage were being computed perfectly on Groq the whole time. The router
+    worked; only the words failed.
+    """
+    import asyncio
+    import inspect
+
+    src = inspect.getsource(chat_engine._chat_completion)
+    ck("bedrock is wrapped, not assumed", "try:" in src)
+    ck("a failure falls through to groq", "falling back to groq" in src)
+    ck("an EMPTY reply also falls back", "returned empty" in src)
+    ck("the fallback is logged, so an outage is visible",
+       "log(" in src and "bedrock failed" in src)
+    ck("no silent 500 when there is nothing to fall back to",
+       "no GROQ_API_KEY to fall back to" in src)
+
+    # Behaviour, not just source: bedrock down + groq up must still answer.
+    calls = []
+    orig = chat_engine._groq_reply
+
+    async def fake_groq(system, msgs, max_tokens):
+        calls.append("groq")
+        return "groq ka jawab"
+
+    chat_engine._groq_reply = fake_groq
+    os.environ["AWS_BEARER_TOKEN_BEDROCK"] = "expired"
+    os.environ["BEDROCK_MODEL"] = "does-not-exist"
+    os.environ["GROQ_API_KEY"] = "test"
+    os.environ.pop("LLM_PROVIDER", None)
+    try:
+        got = asyncio.get_event_loop().run_until_complete(
+            chat_engine._chat_completion("sys", [{"role": "user", "content": "hi"}],
+                                         100, log=lambda m: None))
+    finally:
+        chat_engine._groq_reply = orig
+        for k in ("AWS_BEARER_TOKEN_BEDROCK", "BEDROCK_MODEL", "GROQ_API_KEY"):
+            os.environ.pop(k, None)
+    ck("a dead bedrock still produces a reply", got == "groq ka jawab", got)
+    ck("and it came from groq", calls == ["groq"], calls)
+
+
 def test_close_session_calls_match_their_signatures():
     """Signature drift is invisible until the code path actually runs.
 
@@ -1268,6 +1314,7 @@ def main():
                test_memory_prefill_is_not_understanding,
                test_small_talk_gets_small_talk,
                test_medical_boundary_is_doctor_owned_not_everyday,
+               test_conversation_falls_back_like_the_small_jobs_do,
                test_close_session_calls_match_their_signatures,
                test_chat_survives_a_restart,
                test_chat_ui_has_a_working_logout,
