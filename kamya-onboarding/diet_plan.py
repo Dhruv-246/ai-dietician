@@ -510,7 +510,9 @@ _CHANGE_WORDS = ["change", "badal", "badl", "replace", "hata", "nahi mil",
                  "nahi khaunga", "nahi khaungi", "shuru kar", "start kar",
                  "heavy", "halka", "bhaari", "zyada ho", "kam kar",
                  "add kar", "daal do", "de dijiye", "chahiye", "mat do",
-                 "nahi chahiye", "ho jata", "problem"]
+                 "nahi chahiye", "ho jata", "problem",
+                 # asking to RECEIVE the plan, not to change it
+                 "bhej", "send", "share", "dikha", "de do", "do na"]
 _DAY_WORDS = [d.lower() for d in WEEKDAYS] + ["somvar", "mangal", "budh",
               "guru", "shukra", "shani", "ravi", "kal", "aaj", "tomorrow",
               "today", "weekend"]
@@ -543,7 +545,13 @@ _CHANGE_SYSTEM = """\
 Read one message from a diet-plan user and decide which of three things it is.
 
 Return JSON only:
-{"kind": "update_request" | "preference" | "none", "note": "..."}
+{"kind": "send_pdf" | "update_request" | "preference" | "none", "note": "..."}
+
+"send_pdf" -- they want the PLAN ITSELF, as it already is. "pdf bhejo", "diet
+plan bhej do", "chart share karo", "mujhe plan dikhao", "plan send karo".
+They are asking to RECEIVE it, not to change it. If they ask for both -- "plan
+update karke bhejo" -- that is update_request, because the change has to
+happen first.
 
 "update_request" -- they are ASKING for the written plan/PDF to be rebuilt or
 changed NOW. In any phrasing: "plan update kar do", "naya diet chart bhejo",
@@ -571,7 +579,8 @@ and meal if the user did. Empty for "none".
 
 
 async def classify(text: str, recent: str = "") -> dict:
-    """What is this message: a request to rebuild, a preference, or neither?
+    """Is this message asking for the plan, asking to change it, telling us a
+    preference, or none of those?
 
     Split deliberately. Rebuilding on every stated preference means the plan
     changes under the user without them asking; ignoring preferences means
@@ -588,7 +597,7 @@ async def classify(text: str, recent: str = "") -> dict:
     if not isinstance(data, dict):
         return {"kind": "none", "note": ""}
     kind = str(data.get("kind") or "none").strip().lower()
-    if kind not in ("update_request", "preference", "none"):
+    if kind not in ("send_pdf", "update_request", "preference", "none"):
         kind = "none"
     return {"kind": kind, "note": str(data.get("note") or "").strip()[:400]}
 

@@ -1760,8 +1760,13 @@ def test_plan_change_prompt_boundaries():
     literal check would straddle a newline.
     """
     flat = " ".join(dpl._CHANGE_SYSTEM.split())
-    ck("the classifier sorts into exactly three kinds",
-       all(k in flat for k in ('"update_request"', '"preference"', '"none"')))
+    ck("the classifier sorts into exactly four kinds",
+       all(k in flat for k in ('"send_pdf"', '"update_request"',
+                               '"preference"', '"none"')))
+    ck("asking FOR the plan is not asking to change it",
+       "pdf bhejo" in flat and "asking to RECEIVE it" in flat)
+    ck("asking for both puts the change first",
+       "plan update karke bhejo" in flat)
     ck("an explicit rebuild request is its own kind",
        "plan update kar do" in flat and "naya diet chart bhejo" in flat)
     ck("a stated preference is banked, not acted on now",
@@ -1786,6 +1791,33 @@ def test_plan_preference_rendering():
     ck("every banked note appears",
        "No roti at all" in out and "Away on Sundays" in out)
     ck("the model is told to honour all of them", "Honour ALL" in out)
+
+
+def test_plan_card_in_chat():
+    """Mira can send the PDF into the thread as a download card.
+
+    The marker rides inside the message TEXT rather than a new attachment
+    field, so sessions, chat_store and /chat/history carry it unchanged and
+    the card is still there after a refresh or a restart.
+    """
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "chat_ui.html"),
+              encoding="utf-8").read()
+    ck("the chat UI knows the card marker", "[[PLAN_PDF]]" in ui)
+    ck("the marker is stripped before the text is shown",
+       "text.split(PLAN_CARD).join('')" in ui)
+    ck("the card is appended to the bubble", "m.appendChild(planCard())" in ui)
+    ck("the card and the menu share one download path",
+       ui.count("async function downloadPlan(") == 1
+       and ui.count("downloadPlan(") >= 3)
+
+    bot = open(os.path.join(os.path.dirname(__file__), "..", "bot.py"),
+               encoding="utf-8").read()
+    ck("the server sends the same marker", 'PLAN_CARD = "[[PLAN_PDF]]"' in bot)
+    ck("a send_pdf request is handled", 'if kind == "send_pdf":' in bot)
+    ck("every announcement carries the file",
+       bot.count("PLAN_CARD") >= 5)
+    ck("asking for a copy does not force a rebuild",
+       "asking for a copy is not asking for a different plan" in bot)
 
 
 def test_plan_pdf_renders():
@@ -2075,7 +2107,7 @@ def main():
                test_diet_plan_note_hygiene, test_plan_change_prefilter,
                test_plan_pdf_renders, test_plan_trigger_contract,
                test_plan_change_prompt_boundaries,
-               test_plan_preference_rendering,
+               test_plan_preference_rendering, test_plan_card_in_chat,
                test_prompt_invariants,
                test_bedrock_falls_back):
         fn()

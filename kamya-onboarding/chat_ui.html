@@ -43,6 +43,16 @@
   .sheet .danger{color:#B4402F}
   .sheet button .hint{display:block;font-size:12px;color:#667781;margin-top:2px}
   .sheet button[disabled]{opacity:.55;cursor:default}
+  .filecard{display:flex;align-items:center;gap:10px;width:100%;margin-top:7px;
+    padding:9px 11px;border:0;border-radius:8px;background:#F5F6F6;
+    font:inherit;text-align:left;cursor:pointer}
+  .filecard:hover:not([disabled]){background:#ECEFF1}
+  .filecard[disabled]{opacity:.6;cursor:default}
+  .filecard .fi{flex:none;width:34px;height:34px;border-radius:6px;
+    background:#C4402F;color:#fff;font-size:10px;font-weight:700;
+    display:flex;align-items:center;justify-content:center;letter-spacing:.4px}
+  .filecard .fmeta{display:flex;flex-direction:column;min-width:0}
+  .filecard .fsub{font-size:12px;color:#667781;margin-top:1px}
   [hidden]{display:none !important}
   .ava{width:40px;height:40px;border-radius:50%;object-fit:cover;flex:none;
        background:#0b6b58}
@@ -160,13 +170,39 @@ const outbox = [];
 
 const clock = () => new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
 
+const PLAN_CARD = '[[PLAN_PDF]]';
+
+// A download card inside a message bubble. The marker travels in the message
+// TEXT, so it comes back from /chat/history after a refresh and the card is
+// still there -- no attachment plumbing in the session or the store.
+function planCard(){
+  const card = document.createElement('button');
+  card.className = 'filecard';
+  card.innerHTML = '<span class="fi">PDF</span>'
+                 + '<span class="fmeta"><b>Diet plan</b>'
+                 + '<span class="fsub">tap to download</span></span>';
+  card.addEventListener('click', () => {
+    const sub = card.querySelector('.fsub');
+    downloadPlan((state, msg) => {
+      card.disabled = (state === 'busy');
+      sub.textContent = state === 'busy'  ? 'download ho raha hai...'
+                      : state === 'error' ? msg
+                      :                     'download ho gaya';
+    });
+  });
+  return card;
+}
+
 function bubble(role, text, stamp){
   const row = document.createElement('div');
   row.className = 'row ' + (role === 'user' ? 'you' : 'mira') + (lastRole !== role ? ' gap' : '');
   lastRole = role;
   const m = document.createElement('div');
   m.className = 'msg';
+  const hasCard = typeof text === 'string' && text.includes(PLAN_CARD);
+  if (hasCard) text = text.split(PLAN_CARD).join('').replace(/\s+/g, ' ').trim();
   m.textContent = text;
+  if (hasCard) m.appendChild(planCard());
   const t = document.createElement('span');
   t.className = 't';
   t.textContent = stamp || clock();
@@ -236,18 +272,19 @@ async function refreshPlanHint(){
   } catch (e) {}
 }
 
-planBtn.addEventListener('click', async () => {
-  if (planBusy) return;
+// One download path, used by the menu item and by the card Mira sends in
+// the thread. Returns an error string, or '' on success.
+async function downloadPlan(onState){
+  if (planBusy) return 'already';
   planBusy = true;
-  planBtn.disabled = true;
-  planHint.textContent = 'download ho raha hai...';
+  onState && onState('busy');
   try {
     const r = await fetch(`/plan.pdf?uid=${encodeURIComponent(UID)}`);
     if (!r.ok){
       let msg = 'Plan abhi ban nahi paaya. Thodi der baad try kijiye.';
       try { msg = (await r.json()).error || msg; } catch (e) {}
-      planHint.textContent = msg;
-      return;
+      onState && onState('error', msg);
+      return msg;
     }
     const blob = await r.blob();
     const url  = URL.createObjectURL(blob);
@@ -257,18 +294,29 @@ planBtn.addEventListener('click', async () => {
                    .match(/filename="([^"]+)"/)?.[1] || 'diet-plan.pdf';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 4000);
-    planHint.textContent = 'download ho gaya';
-    menu(false);
-    // Only present when the plan was built just now. Mira also wrote it into
-    // the thread server-side, so a refresh shows the same message.
+    onState && onState('done');
+    // Only present when the plan was built just now. Mira also writes it
+    // into the thread server-side, so a refresh shows the same message.
     const said = r.headers.get('X-Plan-Message');
     if (said) bubble('assistant', said);
+    return '';
   } catch (e) {
-    planHint.textContent = 'Network problem. Dobara try kijiye.';
+    const msg = 'Network problem. Dobara try kijiye.';
+    onState && onState('error', msg);
+    return msg;
   } finally {
     planBusy = false;
-    planBtn.disabled = false;
   }
+}
+
+planBtn.addEventListener('click', () => {
+  downloadPlan((state, msg) => {
+    planBtn.disabled = (state === 'busy');
+    planHint.textContent = state === 'busy'  ? 'download ho raha hai...'
+                         : state === 'error' ? msg
+                         :                     'download ho gaya';
+    if (state === 'done') menu(false);
+  });
 });
 
 document.getElementById('logoutBtn').addEventListener('click', () => {

@@ -2072,6 +2072,16 @@ async def _maybe_update_plan(uid, profile, memory, text):
     try:
         verdict = await diet_plan.classify(text)
         kind, note = verdict.get("kind"), verdict.get("note") or text[:400]
+        if kind == "send_pdf":
+            # They want the plan as it stands. Build one only if none exists;
+            # asking for a copy is not asking for a different plan.
+            plan, made = await _ensure_plan(uid, profile, memory)
+            _log(f"plan: send requested uid={uid[:8]} built_now={made}")
+            await _plan_announce(
+                uid, profile, memory,
+                ("Yeh raha aapka is hafte ka diet plan. " if made
+                 else "Yeh raha aapka diet plan. ") + PLAN_CARD)
+            return
         if kind == "preference":
             # Banked silently. Mira has already answered in her own reply --
             # a second "noted" message here would be the nagging the user
@@ -2114,9 +2124,7 @@ async def _maybe_update_plan(uid, profile, memory, text):
         # rather than silently dropping what the user told us.
         await diet_plan.mark_applied(uid, [r.get("id") for r in pend], log=_log)
         said = reply or "Aapka diet plan update kar diya hai."
-        await _plan_announce(
-            uid, profile, memory,
-            f"{said} Menu se nayi PDF download kar lijiye.")
+        await _plan_announce(uid, profile, memory, f"{said} {PLAN_CARD}")
     except Exception as exc:
         _log(f"plan chat-update failed uid={uid[:8]}: "
              f"{type(exc).__name__}: {exc}")
@@ -2213,12 +2221,18 @@ async def _plan_after_onboarding(uid: str):
         await _ensure_plan(
             uid, profile, memory,
             announce=("Aur haan -- aapka is hafte ka diet plan bhi taiyaar "
-                      "hai. Upar menu mein 'Diet plan (PDF)' se download kar "
-                      "lijiye."))
+                      "hai. " + PLAN_CARD))
         _log(f"plan after onboarding ready uid={uid[:8]}")
     except Exception as exc:
         _log(f"plan after onboarding failed uid={uid[:8]}: "
              f"{type(exc).__name__}: {exc}")
+
+
+# Rendered by chat_ui as a download card. It rides inside the message TEXT on
+# purpose: sessions, chat_store and /chat/history all carry text already, so
+# the card survives a refresh and a restart without any of them learning
+# about attachments.
+PLAN_CARD = "[[PLAN_PDF]]"
 
 
 async def _plan_announce(uid, profile, memory, text):
@@ -2267,9 +2281,9 @@ async def plan_pdf_download(uid: str = ""):
     if plan_pdf is None or diet_plan is None:
         return JSONResponse({"error": "Plan feature unavailable."},
                             status_code=503)
-    announce = ("Aapka is hafte ka diet plan ready hai! PDF download ho gaya "
-                "hai. Koi bhi din ka khaana suit na kare toh mujhe bata "
-                "dijiye, main change kar dungi.")
+    announce = ("Aapka is hafte ka diet plan ready hai! Koi bhi din ka khaana "
+                "suit na kare toh mujhe bata dijiye, main change kar dungi. "
+                + PLAN_CARD)
     try:
         plan, made = await _ensure_plan(uid, profile, memory,
                                         announce=announce)
@@ -2419,7 +2433,7 @@ async def _weekly_plan_sweep():
             _plan, made = await _ensure_plan(
                 uid, profile, memory, week=week,
                 announce=("Agle hafte ka aapka naya diet plan taiyaar hai. "
-                          "Menu se PDF download kar lijiye."))
+                          + PLAN_CARD))
             done += made
         except Exception as exc:
             _log(f"plan sweep failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
