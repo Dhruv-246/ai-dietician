@@ -1,0 +1,291 @@
+/* Light product theme for the pre-chat flow: login, signup, onboarding.
+ *
+ * ADDITIVE AND SCOPED ON PURPOSE. It is linked AFTER styles.css from exactly
+ * three pages. The chat page at "/" does not link it and is untouched, so
+ * this cannot break the thing people use every day. Reverting is deleting one
+ * <link> tag per page.
+ *
+ * Why light: the dark green was doing the product no favours. A health app
+ * asking for your age, weight and medical history reads as clinical and
+ * trustworthy in light, and as a niche gadget in dark. Colour is kept from
+ * the existing brand green so nothing else has to change.
+ */
+
+:root {
+  --p-bg: #F3F6F4;
+  --p-card: #FFFFFF;
+  --p-ink: #10231C;          /* near-black with a green cast, not pure #000 */
+  --p-muted: #5C7268;
+  --p-line: #DCE5E0;
+  --p-line-strong: #C3D2CB;
+  --p-accent: #0E9F6E;       /* brand green, darkened for AA on white */
+  --p-accent-hover: #0B8A5F;
+  --p-accent-soft: #E7F6F0;
+  --p-danger: #C0392B;
+  --p-ring: rgba(14, 159, 110, .18);
+  --p-shadow: 0 1px 2px rgba(16,35,28,.04), 0 8px 28px rgba(16,35,28,.07);
+}
+
+body {
+  background: var(--p-bg);
+  color: var(--p-ink);
+  -webkit-font-smoothing: antialiased;
+  display: block;
+  padding: 0;
+}
+
+/* ---------------------------------------------------------------- shell -- */
+.auth-wrap, .ob-wrap {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 24px 20px calc(24px + env(safe-area-inset-bottom));
+  max-width: none;
+}
+
+.auth-card, .ob-wrap > .ob-topbar, .ob-wrap > .ob-step {
+  background: var(--p-card);
+  border: 1px solid var(--p-line);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  border-radius: 16px;
+  padding: 36px 32px 32px;
+  box-shadow: var(--p-shadow);
+  text-align: left;
+}
+
+/* The onboarding card is topbar + step stitched into one surface, so the
+   progress bar sits INSIDE the card rather than floating above it. */
+.ob-wrap { max-width: none; }
+.ob-topbar {
+  width: 100%;
+  max-width: 460px;
+  border-radius: 16px 16px 0 0;
+  border-bottom: none;
+  margin: 0;
+  padding: 20px 28px 0;
+  gap: 14px;
+  box-shadow: var(--p-shadow);
+}
+.ob-step {
+  width: 100%;
+  max-width: 460px;
+  border-radius: 0 0 16px 16px;
+  border-top: none;
+  padding: 22px 28px 30px;
+  gap: 0;
+  flex: 0 0 auto;
+  box-shadow: var(--p-shadow);
+}
+
+/* ----------------------------------------------------------- brand/head -- */
+.brand { gap: 10px; align-items: center; }
+.brand h1, .auth-title {
+  color: var(--p-ink);
+  letter-spacing: -.02em;
+}
+.auth-title { font-size: 21px; font-weight: 650; margin: 18px 0 22px; }
+.brand-mark { filter: none; }
+
+/* -------------------------------------------------------------- progress -- */
+.ob-progress {
+  background: var(--p-line);
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  flex: 1;
+}
+.ob-bar {
+  background: var(--p-accent);
+  height: 100%;
+  border-radius: 999px;
+  transition: width .32s cubic-bezier(.2,.7,.3,1);
+}
+.ob-back {
+  color: var(--p-muted);
+  font-size: 20px;
+  line-height: 1;
+  width: 32px; height: 32px;
+  border-radius: 8px;
+  display: grid; place-items: center;
+  background: none; border: 0; cursor: pointer;
+}
+.ob-back:hover { background: var(--p-accent-soft); color: var(--p-ink); }
+
+/* ------------------------------------------------------------ questions -- */
+.ob-q {
+  font-size: 25px;
+  line-height: 1.25;
+  font-weight: 650;
+  letter-spacing: -.021em;
+  color: var(--p-ink);
+  margin: 6px 0 22px;
+  text-wrap: balance;
+}
+.ob-label, .field > span, label.ob-label {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: .085em;
+  text-transform: uppercase;
+  color: var(--p-muted);
+  margin: 0 0 8px;
+}
+.ob-footer {
+  color: var(--p-muted);
+  font-size: 13px;
+  line-height: 1.55;
+  margin-top: 14px;
+}
+
+/* --------------------------------------------------------------- inputs -- */
+.ob-bigfield, .ob-freetext, .ob-select, .field input, .auth-form input {
+  width: 100%;
+  background: var(--p-card);
+  color: var(--p-ink);
+  border: 1.5px solid var(--p-line-strong);
+  border-radius: 10px;
+  padding: 0 14px;
+  height: 52px;
+  font-size: 16px;          /* 16px stops iOS zooming on focus */
+  font-weight: 500;
+  transition: border-color .15s, box-shadow .15s;
+  appearance: none;
+}
+.ob-freetext { height: auto; padding: 13px 14px; }
+.ob-bigfield::placeholder, .field input::placeholder, .auth-form input::placeholder {
+  color: #9CB0A7; font-weight: 400;
+}
+.ob-bigfield:focus, .ob-freetext:focus, .ob-select:focus,
+.field input:focus, .auth-form input:focus {
+  outline: none;
+  border-color: var(--p-accent);
+  box-shadow: 0 0 0 4px var(--p-ring);
+}
+.ob-select {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' stroke='%235C7268' stroke-width='1.8' fill='none' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  padding-right: 36px;
+  cursor: pointer;
+}
+.field { display: flex; flex-direction: column; gap: 0; }
+
+/* ---------------------------------------------------------------- chips -- */
+.ob-chips { gap: 10px; margin-bottom: 4px; }
+.ob-chip, .ob-none {
+  background: var(--p-card);
+  color: var(--p-ink);
+  border: 1.5px solid var(--p-line-strong);
+  border-radius: 999px;
+  padding: 11px 18px;
+  font-size: 15px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: border-color .14s, background .14s, color .14s;
+}
+.ob-chip:hover, .ob-none:hover { border-color: var(--p-accent); }
+.ob-chip.sel, .ob-none.sel {
+  background: var(--p-accent-soft);
+  border-color: var(--p-accent);
+  color: #0A6B49;
+  font-weight: 650;
+}
+.ob-chip:focus-visible, .ob-none:focus-visible {
+  outline: none; box-shadow: 0 0 0 4px var(--p-ring);
+}
+
+/* Segmented control (kg / lb). One control, not two loose buttons. */
+.ob-seg {
+  display: inline-flex;
+  background: var(--p-bg);
+  border: 1.5px solid var(--p-line-strong);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 2px;
+  flex: none;
+}
+.ob-seg button {
+  border: 0; background: none; cursor: pointer;
+  padding: 0 16px; height: 42px;
+  border-radius: 7px;
+  font-size: 14.5px; font-weight: 600;
+  color: var(--p-muted);
+  transition: background .14s, color .14s;
+}
+.ob-seg button.sel { background: var(--p-card); color: var(--p-ink); box-shadow: 0 1px 2px rgba(16,35,28,.10); }
+
+/* -------------------------------------------------------------- buttons -- */
+.ob-btn, .auth-btn {
+  width: 100%;
+  height: 52px;
+  margin-top: 22px;
+  background: var(--p-accent);
+  color: #fff;
+  border: 0;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -.005em;
+  cursor: pointer;
+  transition: background .15s;
+}
+.ob-btn:hover, .auth-btn:hover { background: var(--p-accent-hover); transform: none; }
+.ob-btn:focus-visible, .auth-btn:focus-visible { outline: none; box-shadow: 0 0 0 4px var(--p-ring); }
+.ob-btn:disabled, .auth-btn:disabled { background: #A9C9BC; cursor: not-allowed; }
+
+.ob-link {
+  background: none; border: 0; padding: 0;
+  text-decoration: none;      /* the base sheet underlines it at rest */
+  color: var(--p-accent);
+  font-size: 14px; font-weight: 600;
+  cursor: pointer;
+  margin-top: 10px;
+  align-self: flex-start;
+}
+.ob-link:hover { text-decoration: underline; }
+
+/* --------------------------------------------------------------- errors -- */
+.ob-err, .auth-error {
+  color: var(--p-danger);
+  background: #FDECEA;
+  border: 1px solid #F5C6C0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  margin-top: 14px;
+}
+.auth-alt { color: var(--p-muted); margin-top: 18px; font-size: 14.5px; }
+.auth-alt a { color: var(--p-accent); }
+.auth-loading { color: var(--p-muted); background: var(--p-bg); }
+.role-line { color: var(--p-muted); }
+
+/* ------------------------------------------------------------- spacing --- */
+/* The step was a flex column with a blanket gap, which spaced labels away
+   from the fields they belong to. Space by RELATIONSHIP instead: a label hugs
+   its field, and a new group opens a gap.
+   Note: no blanket `.ob-step > * { margin: 0 }` -- that reset the submit
+   button's own top margin and left it touching the last input. */
+.ob-step .ob-row { gap: 10px; margin: 0; }
+
+/* A new group starts after whatever ended the last one. */
+.ob-step .ob-bigfield + .ob-label,
+.ob-step .ob-row + .ob-label,
+.ob-step .ob-chips + .ob-label,
+.ob-step .ob-link + .ob-label,
+.ob-step .ob-select + .ob-label { margin-top: 22px; }
+
+/* The submit always stands clear of the last control, whatever it was. */
+.ob-step .ob-btn { margin-top: 28px; }
+
+@media (max-width: 420px) {
+  .auth-card { padding: 28px 22px; }
+  .ob-topbar { padding: 18px 20px 0; }
+  .ob-step { padding: 20px 20px 26px; }
+  .ob-q { font-size: 23px; }
+}
