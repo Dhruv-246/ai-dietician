@@ -1750,16 +1750,39 @@ async def call_ui(request: Request):
             qs = f"?uid={quote(uid)}"
             return RedirectResponse(f"/chat{qs}")
 
-    return HTMLResponse((_HERE / "call_ui.html").read_text(encoding="utf-8"))
+    html = (_HERE / "call_ui.html").read_text(encoding="utf-8")
+    return HTMLResponse(html.replace("{{AVATAR_V}}", _avatar_version()))
+
+
+def _avatar_version() -> str:
+    """Short content hash of the avatar, recomputed per request.
+
+    CACHE BUSTING. Replacing the image file changed nothing for anyone who had
+    already loaded the page: the URL was identical, so browsers served their
+    stored copy and kept showing the old photo. Only an ETag and Last-Modified
+    were set, and browsers routinely skip revalidating images.
+
+    Hashing the bytes makes the URL change whenever the image does, which is
+    the only version of this that cannot go stale. Recomputed per request
+    rather than at boot so a redeploy is not required to pick up a new file.
+    """
+    try:
+        import hashlib
+        return hashlib.sha256((_HERE / "mira_avatar.jpg").read_bytes()).hexdigest()[:12]
+    except Exception:
+        return "0"
 
 
 @app.get("/mira_avatar.jpg")
 async def avatar():
-    """Mira's avatar used by the call screen (falls back to an emoji if absent)."""
+    """Mira's avatar, used by the chat header and the call screen."""
     path = _HERE / "mira_avatar.jpg"
-    if path.exists():
-        return FileResponse(path, media_type="image/jpeg")
-    return HTMLResponse(status_code=404)
+    if not path.exists():
+        return HTMLResponse(status_code=404)
+    # Safe to cache hard BECAUSE the URL carries a content hash: a new image
+    # is a new URL, so nothing can be served stale.
+    return FileResponse(path, media_type="image/jpeg", headers={
+        "Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.on_event("startup")
@@ -1890,7 +1913,8 @@ LOGOUT_URL = os.getenv("LOGOUT_URL", WEB_APP_URL.rstrip("/") + "/logout")
 @app.get("/chat", response_class=HTMLResponse)
 async def chat_page():
     html = Path(__file__).with_name("chat_ui.html").read_text(encoding="utf-8")
-    return HTMLResponse(html.replace("{{LOGOUT_URL}}", LOGOUT_URL))
+    html = html.replace("{{LOGOUT_URL}}", LOGOUT_URL)
+    return HTMLResponse(html.replace("{{AVATAR_V}}", _avatar_version()))
 
 
 @app.get("/chat/history")

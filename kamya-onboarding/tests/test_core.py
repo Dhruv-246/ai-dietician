@@ -1146,6 +1146,39 @@ def test_chat_survives_a_restart():
     ck("the store is optional", chat_store.enabled() in (True, False))
 
 
+def test_avatar_url_is_content_versioned():
+    """Replacing the image changed nothing for anyone who had loaded the page.
+
+    The URL was identical, so browsers served their stored copy and kept
+    showing the old photo -- the file on the server was already correct and
+    byte-identical to the new one. Only ETag and Last-Modified were set, and
+    browsers routinely skip revalidating images.
+    """
+    import pathlib
+    here = pathlib.Path(chat_engine.__file__).parent
+    bot = (here / "bot.py").read_text(encoding="utf-8")
+
+    ck("the version is a hash of the image BYTES",
+       "hashlib.sha256" in bot and "mira_avatar.jpg" in bot)
+    ck("it is computed per request, not pinned at boot",
+       "def _avatar_version" in bot and "read_bytes()" in bot)
+    ck("hashing failure degrades instead of 500ing", 'return "0"' in bot)
+
+    import re as _re
+    for page in ("chat_ui.html", "call_ui.html"):
+        html = (here / page).read_text(encoding="utf-8")
+        refs = _re.findall(r"mira_avatar\.jpg(\?v=\{\{AVATAR_V\}\})?", html)
+        ck(f"{page} references the avatar", len(refs) >= 1)
+        # EVERY reference must carry the version, not just one of them -- a
+        # single unversioned one is enough to serve a stale image.
+        ck(f"{page} versions every reference", all(refs), refs)
+    ck("both pages get the placeholder substituted",
+       bot.count('"{{AVATAR_V}}", _avatar_version()') == 2)
+
+    # Caching hard is only safe BECAUSE the URL carries the hash.
+    ck("the image is cached hard", "immutable" in bot and "max-age=31536000" in bot)
+
+
 def test_chat_ui_has_a_working_logout():
     """The burger was decorative -- aria-hidden, no handler, no way out."""
     import pathlib
@@ -1603,6 +1636,7 @@ def main():
                test_conversation_falls_back_like_the_small_jobs_do,
                test_close_session_calls_match_their_signatures,
                test_chat_survives_a_restart,
+               test_avatar_url_is_content_versioned,
                test_chat_ui_has_a_working_logout,
                test_chat_ui_queues_instead_of_dropping,
                test_chat_bubble_edges, test_emergency_outranks_medical,
