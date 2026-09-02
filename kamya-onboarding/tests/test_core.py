@@ -870,6 +870,26 @@ def test_guard_covers_every_observed_failure():
     ck("ordinary use of the word team is left alone",
        sp("Team ne accha kaam kiya.")[0])
 
+    # PLAN EDIT CLAIMS -- her reply is written before the plan is amended, so
+    # anything specific she says about the edit is a guess. Live: the user
+    # asked to remove lauki from Monday, she said "hata di, aloo rakh diya hai
+    # Monday dinner mein", and the amend put zucchini in Monday LUNCH.
+    ec = chat_guard.strip_plan_edit_claims
+    ck("a completed-edit claim is removed",
+       not ec("Haan, hata di. Aloo rakh diya hai Monday dinner mein.")[0])
+    ck("naming the replacement is removed too",
+       not ec("Lauki hata diya Monday ke lunch se, zucchini dal diya!")[0])
+    ck("present tense is honest and survives",
+       ec("Theek hai, update kar rahi hoon.")[0])
+    ck("imperative advice is not a claim",
+       ec("Roti hata dijiye raat ko.")[0] == "Roti hata dijiye raat ko.")
+    ck("the rest of a multi-part reply survives",
+       ec("Protein ke liye dal accha hai. Monday se hata diya.")[0]
+       == "Protein ke liye dal accha hai.")
+    ck("an emptied reply becomes the plan line, not the team brush-off",
+       G.apply("Haan, hata di. Aloo rakh diya hai.", situation="PROBLEM")
+       == chat_guard.PLAN_EDIT_SUBSTITUTE)
+
     # GENDER -- both directions have failed live.
     ck("her verbs are made feminine",
        "sakti hoon" in G.apply("Main samajh sakta hoon.", situation="PROBLEM"))
@@ -1924,6 +1944,12 @@ def test_plan_card_in_chat():
     ck("polling stops when the tab is hidden", "document.hidden" in ui)
     ck("a message that may trigger a plan is checked promptly",
        "setTimeout(pollAnnouncements, ms)" in ui)
+    # The card appeared TWICE live: the interval and the post-message checks
+    # both fetched with the same `since` before either advanced it.
+    ck("overlapping polls cannot both append",
+       "planPolling" in ui and "if (document.hidden || !UID || planPolling)" in ui)
+    ck("appending is idempotent even if one slips through",
+       "seenPlanTs" in ui and "seenPlanTs.has(key)" in ui)
 
     # Flattened: the prompt is wrapped prose, so a literal check straddles
     # a newline.
@@ -1935,7 +1961,10 @@ def test_plan_card_in_chat():
        "Never tell them to go to the menu" in prompt
        and "reads as a refusal when the file was on its way" in prompt)
     ck("a change is described as coming, not already done",
-       "do not claim it is already done" in prompt)
+       "never say it is done" in prompt.lower())
+    ck("she is told not to name the replacement she has not chosen",
+       "Never say what you replaced it with" in prompt
+       and "put zucchini in Monday LUNCH" in prompt)
 
 
 def test_plan_pdf_renders():

@@ -389,18 +389,37 @@ async function deliver(text){
 let lastPlanTs = 0;
 let planPollTimer = null;
 
+// Two guards, because the card was posted TWICE in a live chat.
+//
+// The interval and the post-message checks overlap: both called this, both
+// awaited a fetch carrying the SAME `since`, both got the same message back,
+// and both appended it -- lastPlanTs was only advanced after the await.
+//
+// `planPolling` stops the overlap. `seenPlanTs` makes appending idempotent
+// even if one slips through, which is the guarantee that actually matters:
+// a duplicate here is a duplicate the user sees.
+let planPolling = false;
+const seenPlanTs = new Set();
+
 async function pollAnnouncements(){
-  if (document.hidden || !UID) return;
+  if (document.hidden || !UID || planPolling) return;
+  planPolling = true;
   try {
     const r = await fetch(`/chat/announcements?uid=${encodeURIComponent(UID)}`
                           + `&since=${lastPlanTs}`);
     if (!r.ok) return;
     const d = await r.json();
     for (const m of (d.messages || [])){
+      const key = String(m.ts || '');
+      if (key && seenPlanTs.has(key)) continue;
+      if (key) seenPlanTs.add(key);
       bubble('assistant', m.text);
       if (m.ts && m.ts > lastPlanTs) lastPlanTs = m.ts;
     }
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    planPolling = false;
+  }
 }
 
 // Every few seconds while the tab is open. One small JSON response, and it

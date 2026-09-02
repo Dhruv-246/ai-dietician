@@ -37,6 +37,14 @@ SAFE_SUBSTITUTE = os.getenv(
     "Us bare mein Kamya team aapko sahi bata payegi. "
     "Khaane ya health ka kuch poochna ho toh main yahan hoon 🙂")
 
+# When her whole reply was a claim about an edit that has not happened yet,
+# the generic substitute above is wrong -- she IS doing it, and handing the
+# user to the team reads as a refusal. Say the true thing instead. The amend
+# posts the actual change a minute later.
+PLAN_EDIT_SUBSTITUTE = os.getenv(
+    "CHAT_PLAN_EDIT_SUBSTITUTE",
+    "Haan, plan update kar rahi hoon — ek minute mein bhejti hoon 👍")
+
 # ------------------------------------------------------- off-topic offer ---
 # She must ANSWER, then say warmly what she is for. Naming your purpose is a
 # person setting a boundary; handing over a list of topics is an IVR. These
@@ -180,6 +188,35 @@ def strip_promises(text: str):
     return re.sub(r"\s{2,}", " ", out).strip(), n
 
 
+# ------------------------------------------------------ plan edit claims ---
+# Her reply is written BEFORE the plan is amended, so anything specific she
+# says about the edit is a guess. A live run: the user asked to remove lauki
+# from Monday, she answered "Haan, hata di. Aloo rakh diya hai Monday dinner
+# mein" -- and the actual amend put zucchini in Monday LUNCH. Two models
+# narrating the same change, disagreeing on the food, the meal and the tense.
+#
+# Only one of them knows: the amend, which posts its own message afterwards.
+# So her completion CLAIMS are removed here and the rest of her reply stands.
+# Past tense and first person only -- "roti hata dijiye" is advice, not a
+# claim, and must survive.
+_EDIT_CLAIM = re.compile(
+    r"[^.!?\n]*\b("
+    r"hata\s*(di|diya|diye)|nikal\s*(di|diya)|"
+    r"(rakh|daal|dal|add\s*kar|replace\s*kar|swap\s*kar)\s*(di|diya|diye)|"
+    r"(change|update|badal)\s*(kar\s*)?(di|diya|diye)"
+    r")\b[^.!?\n]*[.!?]?", re.I)
+
+
+def strip_plan_edit_claims(text: str):
+    """Drop sentences claiming a plan edit is already done.
+
+    The edit takes a minute and happens after this reply. Saying it is done,
+    and naming a food she has not chosen, is wrong twice over.
+    """
+    out, n = _EDIT_CLAIM.subn("", text or "")
+    return re.sub(r"\s{2,}", " ", out).strip(), n
+
+
 # ---------------------------------------------------------------- gender ---
 # Mira is a woman; the user may not be. Both directions have failed live:
 # "samajh sakta hoon" (her, masculine) and "skip kar rahi ho" (to a man).
@@ -305,10 +342,17 @@ def apply(reply: str, *, situation: str = "", user_gender: str = "",
         # restoring the original would ship exactly what the check exists to
         # stop. Substitute instead.
         unsafe_removed = False
+        plan_edit_removed = False
 
         reply, n = strip_promises(reply)
         if n:
             hits.append(f"promise x{n}")
+            unsafe_removed = True
+
+        reply, n = strip_plan_edit_claims(reply)
+        plan_edit_removed = bool(n)
+        if n:
+            hits.append(f"plan edit claim x{n}")
             unsafe_removed = True
 
         reply, n = fix_gender(reply, user_gender)
@@ -337,6 +381,10 @@ def apply(reply: str, *, situation: str = "", user_gender: str = "",
 
         # ---- BLOCK / SUBSTITUTE: a rewrite that ate the whole reply -------
         if not reply.strip():
+            if plan_edit_removed:
+                log("chat guard: reply was ENTIRELY a claim about an edit "
+                    "that has not run yet -- substituting")
+                return PLAN_EDIT_SUBSTITUTE
             if unsafe_removed:
                 log("chat guard: reply was ENTIRELY a promise or an invented "
                     "claim -- substituting")
