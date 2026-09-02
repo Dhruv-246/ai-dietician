@@ -1993,14 +1993,16 @@ async def chat_history(uid: str = ""):
     sess = chat_session.STORE.get(uid)
     msgs = []
     if sess and not sess.closed:
-        msgs = [{"role": m["role"], "text": m["text"]} for m in sess.messages]
+        msgs = [{"role": m["role"], "text": m["text"], "ts": m.get("ts")}
+                for m in sess.messages]
     else:
         # Nothing in memory does not mean nothing happened -- the process may
         # simply have restarted. Show the stored thread rather than an empty
         # screen that implies the conversation never took place.
         row = await chat_store.load(uid, log=_log)
         if row and not row.get("closed"):
-            msgs = [{"role": m.get("role"), "text": m.get("text")}
+            msgs = [{"role": m.get("role"), "text": m.get("text"),
+                     "ts": m.get("ts")}
                     for m in (row.get("messages") or []) if m.get("text")]
     name = str(profile.get("name", "")).strip()
     greet = CHAT_GREETING if not name else CHAT_GREETING.replace("Hey!", f"Hey {name}!")
@@ -2355,6 +2357,35 @@ async def plan_regenerate(request: Request):
         return JSONResponse({"error": "Plan update nahi ho paaya."},
                             status_code=503)
     return {"ok": True, "week_start": plan.get("week_start", "")}
+
+
+@app.get("/chat/announcements")
+async def chat_announcements(uid: str = "", since: float = 0.0):
+    """Plan messages Mira posted on her own, after `since`.
+
+    /chat/history is fetched once at boot, so anything written server-side --
+    the PDF card, "plan updated", Sunday's new week -- sat in the session
+    unseen until the user happened to refresh. That is how "diet plan bhejna"
+    looked like it did nothing.
+
+    Deliberately narrow: only messages carrying the plan card. Reconciling the
+    whole thread against the client would be guesswork, because one stored
+    reply can render as several bubbles.
+    """
+    if not uid:
+        return JSONResponse({"error": "uid missing"}, status_code=400)
+    ok, _p, _m = _chat_eligible(uid)
+    if not ok:
+        return JSONResponse({"error": CHAT_LOCKED}, status_code=403)
+    sess = chat_session.STORE.get(uid)
+    out = []
+    if sess and not sess.closed:
+        for m in sess.messages:
+            if (m.get("role") == "assistant"
+                    and PLAN_CARD in str(m.get("text", ""))
+                    and float(m.get("ts") or 0) > float(since or 0)):
+                out.append({"text": m["text"], "ts": m.get("ts")})
+    return {"messages": out, "building": uid in _PLAN_BUILDING}
 
 
 @app.get("/chat/sessions")

@@ -140,13 +140,43 @@ _PROMISE = re.compile(
     r"bhej\s*(dungi|doongi|denge|dunga)|"
     r"plan\s+(bana\s*denge|ready\s+ho|bhej)|"
     r"promise\s+karti|guarantee|"
-    r"team\s+(call\s+karegi|contact\s+karegi)"
+    # "Team aapko call karegi" slipped through for want of a gap here: the
+    # pattern demanded team and call be adjacent.
+    r"team\s+[^.!?\n]{0,24}?(call|contact|message|reply)\s*kar"
     r")[^.!?\n]*[.!?]?", re.I)
 
 
+# Sending the diet plan stopped being a promise the day she could actually do
+# it. "Plan bhej rahi hoon" matched `plan\s+bhej` and was deleted outright,
+# leaving her confirmation missing while the PDF arrived anyway.
+_IS_PLAN = re.compile(r"\b(diet\s*plan|plan|pdf|chart)\b", re.I)
+# SENDING an existing plan is the exempt act. MAKING one is still a promise:
+# "hum plan bana denge" commits the team to work, and she cannot do that.
+_IS_SENDING = re.compile(
+    r"\b(bhej|send|share|attach|de\s+rahi|bhejti|bheja)\b", re.I)
+# ...but only without a date on it. "Kal plan bhej dungi" is still a promise,
+# because tomorrow is not something she controls.
+_HAS_DATE = re.compile(
+    r"\b(kal|parso|aaj\s+raat|baad\s+mein|thodi\s+der|kuch\s+din|"
+    r"hafte|week|monday|somvar|shaam\s+tak|subah\s+tak)\b", re.I)
+
+
 def strip_promises(text: str):
-    """Remove any sentence that commits to a deliverable or a date."""
-    out, n = _PROMISE.subn("", text or "")
+    """Remove any sentence that commits to a deliverable or a date.
+
+    Exempts the one deliverable she genuinely controls: the plan PDF, which
+    the server attaches to the conversation for her.
+    """
+    def _keep_or_cut(m):
+        sent = m.group(0)
+        if (_IS_PLAN.search(sent) and _IS_SENDING.search(sent)
+                and not _HAS_DATE.search(sent)):
+            return sent
+        return ""
+
+    out, n = _PROMISE.subn(_keep_or_cut, text or "")
+    # subn counts matches, not removals -- an exempted sentence is not a cut.
+    n = sum(1 for m in _PROMISE.finditer(text or "") if not _keep_or_cut(m))
     return re.sub(r"\s{2,}", " ", out).strip(), n
 
 

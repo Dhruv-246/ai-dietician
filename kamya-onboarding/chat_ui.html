@@ -374,9 +374,44 @@ async function deliver(text){
   document.getElementById('status').textContent = 'online';
   busy = false; sendBtn.disabled = false; inp.focus();
 
+  // A plan action triggered by this message runs in the background and can
+  // take up to a minute. Check a few times rather than waiting for the tick.
+  [1200, 4000, 9000, 20000, 35000].forEach(ms =>
+    setTimeout(pollAnnouncements, ms));
+
   // Anything typed while she was replying goes now, in order.
   if (outbox.length) await deliver(outbox.shift());
 }
+
+// Mira posts the plan card herself, from a background task that finishes
+// long after the reply. Nothing pushed it to an open tab, so the card only
+// appeared on refresh -- "diet plan bhejna" looked like it did nothing.
+let lastPlanTs = 0;
+let planPollTimer = null;
+
+async function pollAnnouncements(){
+  if (document.hidden || !UID) return;
+  try {
+    const r = await fetch(`/chat/announcements?uid=${encodeURIComponent(UID)}`
+                          + `&since=${lastPlanTs}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    for (const m of (d.messages || [])){
+      bubble('assistant', m.text);
+      if (m.ts && m.ts > lastPlanTs) lastPlanTs = m.ts;
+    }
+  } catch (e) {}
+}
+
+// Every few seconds while the tab is open. One small JSON response, and it
+// stops entirely when the tab is hidden.
+function startPlanPolling(){
+  if (planPollTimer) return;
+  planPollTimer = setInterval(pollAnnouncements, 4000);
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) pollAnnouncements();
+});
 
 (async function boot(){
   if (!UID){ notice('Login se aayiye — uid missing hai.'); return; }
@@ -384,11 +419,16 @@ async function deliver(text){
     const r = await fetch('/chat/history?uid=' + encodeURIComponent(UID));
     const d = await r.json();
     if (d.error){ notice(d.error); sendBtn.disabled = true; inp.disabled = true; return; }
-    for (const m of (d.messages || [])) bubble(m.role, m.text, m.time);
+    for (const m of (d.messages || [])){
+      bubble(m.role, m.text, m.time);
+      if (m.ts && m.ts > lastPlanTs) lastPlanTs = m.ts;
+    }
+    if (!lastPlanTs) lastPlanTs = Date.now() / 1000;
     if (!(d.messages || []).length){
       bubble('assistant', d.greeting || 'Hi! Main Mira hoon. Kuch bhi poochhiye.');
     }
   } catch(e){ notice('History load nahi hui.'); }
+  startPlanPolling();
   inp.focus();
 })();
 </script>

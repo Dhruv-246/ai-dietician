@@ -851,6 +851,25 @@ def test_guard_covers_every_observed_failure():
     ck("promises are removed", "kal" not in out.lower() and "bana denge" not in out.lower())
     ck("the rest of the reply survives", "Theek hai" in out)
 
+    # ...but SENDING the plan stopped being a promise the day she could do it.
+    # "Plan bhej rahi hoon" matched `plan\s+bhej` and was deleted outright,
+    # so her confirmation vanished while the PDF arrived anyway.
+    sp = chat_guard.strip_promises
+    ck("sending the plan survives",
+       sp("Haan, plan bhej rahi hoon 👍")[0].startswith("Haan"))
+    ck("sending the pdf survives", sp("PDF bhej dungi abhi.")[0])
+    ck("MAKING a plan is still a promise", not sp("Hum plan bana denge.")[0])
+    ck("sending it TOMORROW is still a promise",
+       not sp("Kal aapko plan bhej dungi.")[0])
+    ck("sending something else is still a promise",
+       not sp("Ye recipe bhej dungi.")[0])
+    # This one never matched at all: the pattern wanted team and call adjacent.
+    ck("a team callback is caught even with words between",
+       not sp("Team aapko call karegi.")[0]
+       and not sp("Kamya team aapko contact karegi jaldi.")[0])
+    ck("ordinary use of the word team is left alone",
+       sp("Team ne accha kaam kiya.")[0])
+
     # GENDER -- both directions have failed live.
     ck("her verbs are made feminine",
        "sakti hoon" in G.apply("Main samajh sakta hoon.", situation="PROBLEM"))
@@ -1892,6 +1911,31 @@ def test_plan_card_in_chat():
        bot.count("PLAN_CARD") >= 5)
     ck("asking for a copy does not force a rebuild",
        "asking for a copy is not asking for a different plan" in bot)
+
+    # The card is posted by a background task minutes after the reply, and
+    # /chat/history is fetched once at boot. Without a poll it sat unseen
+    # until the user happened to refresh -- "diet plan bhejna" looked ignored.
+    ck("the server exposes announcements written after page load",
+       '@app.get("/chat/announcements")' in bot and "since" in bot)
+    ck("only plan cards are announced, not the whole thread",
+       "PLAN_CARD in str(m.get(\"text\", \"\"))" in bot)
+    ck("the client polls for them", "pollAnnouncements" in ui
+       and "setInterval(pollAnnouncements" in ui)
+    ck("polling stops when the tab is hidden", "document.hidden" in ui)
+    ck("a message that may trigger a plan is checked promptly",
+       "setTimeout(pollAnnouncements, ms)" in ui)
+
+    # Flattened: the prompt is wrapped prose, so a literal check straddles
+    # a newline.
+    prompt = " ".join(open(os.path.join(os.path.dirname(__file__), "..",
+                           "chat_prompt.md"), encoding="utf-8").read().split())
+    ck("she is told she can send the plan herself",
+       "you CAN send it" in prompt)
+    ck("pointing at the menu is called out as the failure it was",
+       "Never tell them to go to the menu" in prompt
+       and "reads as a refusal when the file was on its way" in prompt)
+    ck("a change is described as coming, not already done",
+       "do not claim it is already done" in prompt)
 
 
 def test_plan_pdf_renders():
