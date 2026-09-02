@@ -1908,19 +1908,20 @@ async def _plan_health() -> dict:
     if not diet_plan.enabled():
         return {"feature": True, "storage": False,
                 "why": "SUPABASE_URL / SUPABASE_KEY not set"}
+    out = {"feature": True}
     try:
         import httpx
         async with httpx.AsyncClient(timeout=5.0) as c:
-            r = await c.get(diet_plan._url(), headers=diet_plan._headers(),
-                            params={"select": "firebase_uid", "limit": "1"})
-        if r.status_code < 300:
-            return {"feature": True, "storage": True,
-                    "table": diet_plan.TABLE}
-        return {"feature": True, "storage": False,
-                "why": f"HTTP {r.status_code}: {r.text[:120]}"}
+            for key, url in (("plans", diet_plan._url()),
+                             ("preferences", diet_plan._prefs_url())):
+                r = await c.get(url, headers=diet_plan._headers(),
+                                params={"select": "firebase_uid", "limit": "1"})
+                out[key] = (True if r.status_code < 300
+                            else f"HTTP {r.status_code}: {r.text[:100]}")
     except Exception as exc:
-        return {"feature": True, "storage": False,
-                "why": f"{type(exc).__name__}: {exc}"[:160]}
+        out["why"] = f"{type(exc).__name__}: {exc}"[:160]
+    out["storage"] = out.get("plans") is True and out.get("preferences") is True
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -2057,30 +2058,61 @@ async def chat_send(request: Request):
 
 
 async def _maybe_update_plan(uid, profile, memory, text):
-    """Background: did that message ask for a change to the written plan?"""
+    """Bank a preference, or rebuild -- never both, never the wrong one.
+
+    A stated preference does NOT rebuild the plan. It is banked and applied
+    at the next build, so the plan never changes under the user without them
+    asking. Only an explicit "plan update kar do" rebuilds now, and when it
+    does it applies everything banked since the last one.
+    """
     if diet_plan is None or not diet_plan.enabled():
         return
     if not diet_plan.maybe_plan_change(text):
         return                      # cheap gate, no model call
-    if uid in _PLAN_BUILDING:
-        return                      # a build is already running
     try:
-        plan = await diet_plan.load(uid, log=_log) or _PLAN_CACHE.get(uid)
-        if not plan or plan.get("week_start") != diet_plan.week_start():
-            return                  # nothing to amend yet
-        verdict = await diet_plan.wants_change(text)
-        if not verdict.get("change"):
+        verdict = await diet_plan.classify(text)
+        kind, note = verdict.get("kind"), verdict.get("note") or text[:400]
+        if kind == "preference":
+            # Banked silently. Mira has already answered in her own reply --
+            # a second "noted" message here would be the nagging the user
+            # asked us to stop doing.
+            await diet_plan.add_preference(uid, note, log=_log)
             return
-        note = str(verdict.get("instruction") or text)[:400]
-        _log(f"plan: chat-driven update uid={uid[:8]} -- {note}")
+        if kind != "update_request":
+            return
+        if uid in _PLAN_BUILDING:
+            _log(f"plan: update asked for uid={uid[:8]} but a build is running")
+            return
+
+        plan = await diet_plan.load(uid, log=_log) or _PLAN_CACHE.get(uid)
+        pend = await diet_plan.pending_preferences(uid, log=_log)
+        # The request itself is the newest instruction, ahead of the backlog.
+        notes = "\n".join(filter(None, [
+            f"They have just asked for this: {note}",
+            diet_plan.prefs_text(pend)]))
+        _log(f"plan: update REQUESTED uid={uid[:8]} -- {note} "
+             f"(+{len(pend)} banked)")
+
         async with _plan_lock(uid):
             _PLAN_BUILDING.add(uid)
             try:
-                updated, reply = await diet_plan.amend(plan, note, log=_log)
+                if plan and plan.get("week_start") == diet_plan.week_start():
+                    updated, reply = await diet_plan.amend(
+                        plan, notes, log=_log)
+                else:
+                    # No current plan to amend -- build this week's outright.
+                    updated = await diet_plan.generate(
+                        profile, memory, start=diet_plan.week_start(),
+                        extra_notes=notes, log=_log)
+                    reply = ""
                 await diet_plan.save(uid, updated, log=_log)
                 _PLAN_CACHE[uid] = updated
             finally:
                 _PLAN_BUILDING.discard(uid)
+
+        # Only after the build succeeded. A failure must leave them pending
+        # rather than silently dropping what the user told us.
+        await diet_plan.mark_applied(uid, [r.get("id") for r in pend], log=_log)
         said = reply or "Aapka diet plan update kar diya hai."
         await _plan_announce(
             uid, profile, memory,
@@ -2141,7 +2173,13 @@ async def _ensure_plan(uid, profile, memory, *, week="", force=False,
             if existing and existing.get("week_start") == week:
                 _PLAN_CACHE[uid] = existing
                 return existing, False
-        _log(f"plan: generating uid={uid[:8]} week={week} force={force}")
+        # Everything the user has told us since the last build. This is the
+        # whole point of banking them: a preference stated on Tuesday has to
+        # show up in Sunday's plan without the user repeating it.
+        pend = await diet_plan.pending_preferences(uid, log=_log)
+        notes = "\n".join(filter(None, [notes, diet_plan.prefs_text(pend)]))
+        _log(f"plan: generating uid={uid[:8]} week={week} force={force} "
+             f"banked_prefs={len(pend)}")
         _PLAN_BUILDING.add(uid)
         try:
             plan = await diet_plan.generate(profile, memory, start=week,
@@ -2149,6 +2187,8 @@ async def _ensure_plan(uid, profile, memory, *, week="", force=False,
             stored = await diet_plan.save(uid, plan, log=_log)
         finally:
             _PLAN_BUILDING.discard(uid)
+        # Consumed only after a successful build.
+        await diet_plan.mark_applied(uid, [r.get("id") for r in pend], log=_log)
         _PLAN_CACHE[uid] = plan
         if not stored:
             _log(f"plan: NOT SAVED uid={uid[:8]} -- does the diet_plans "

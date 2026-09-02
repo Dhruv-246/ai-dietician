@@ -1747,22 +1747,45 @@ def test_plan_change_prefilter():
 
 
 def test_plan_change_prompt_boundaries():
-    """The judgement calls that took several rounds against the live model to
-    get right. Asserted on the PROMPT, since the classifier itself needs a
-    network -- tests/test_chat_live.py exercises the real decision."""
-    p = dpl._CHANGE_SYSTEM
-    # Matched against whitespace-collapsed text: the source wraps these
-    # sentences, so a literal substring check straddles a newline.
-    flat = " ".join(p.split())
-    ck("a stated preference change counts, not just a request",
-       "even as plain information rather than a request" in flat
+    """Only an explicit request rebuilds; a stated preference is banked.
+
+    Rebuilding whenever a user mentions a food changes the plan under them
+    without their asking. Ignoring what they said makes them repeat
+    themselves when they finally do ask. So the classifier sorts into three,
+    and only one of the three rebuilds anything.
+
+    Asserted on the PROMPT -- the classifier needs a network, and the live
+    decision is covered in tests/test_chat_live.py. Matched against
+    whitespace-collapsed text, since the source wraps these sentences and a
+    literal check would straddle a newline.
+    """
+    flat = " ".join(dpl._CHANGE_SYSTEM.split())
+    ck("the classifier sorts into exactly three kinds",
+       all(k in flat for k in ('"update_request"', '"preference"', '"none"')))
+    ck("an explicit rebuild request is its own kind",
+       "plan update kar do" in flat and "naya diet chart bhejo" in flat)
+    ck("a stated preference is banked, not acted on now",
+       "did not ask for it to be rebuilt" in flat
        and "shuru kar raha hoon" in flat)
-    ck("tense separates a future skip from a past miss",
-       "TENSE DECIDES" in p and "already missed" in p)
-    ck("questions about the plan do not change it",
-       "asking what is in the plan" in p)
-    ck("the instruction is written for a dietician to act on",
-       "one plain sentence" in p)
+    ck("tense separates a future fact from a past miss",
+       "TENSE matters" in flat and "day gone" in flat)
+    ck("questions about the plan change nothing",
+       "Asking what is in the plan" in flat)
+    ck("the note is written for a dietician to act on",
+       "one plain English sentence" in flat)
+
+
+def test_plan_preference_rendering():
+    """Banked preferences have to reach the next build as instructions, or
+    the ledger is decorative."""
+    ck("no preferences renders as nothing", dpl.prefs_text([]) == "")
+    ck("blank notes are dropped",
+       dpl.prefs_text([{"note": "  "}, {"note": ""}]) == "")
+    out = dpl.prefs_text([{"id": 1, "note": "No roti at all"},
+                          {"id": 2, "note": "Away on Sundays"}])
+    ck("every banked note appears",
+       "No roti at all" in out and "Away on Sundays" in out)
+    ck("the model is told to honour all of them", "Honour ALL" in out)
 
 
 def test_plan_pdf_renders():
@@ -2052,6 +2075,7 @@ def main():
                test_diet_plan_note_hygiene, test_plan_change_prefilter,
                test_plan_pdf_renders, test_plan_trigger_contract,
                test_plan_change_prompt_boundaries,
+               test_plan_preference_rendering,
                test_prompt_invariants,
                test_bedrock_falls_back):
         fn()

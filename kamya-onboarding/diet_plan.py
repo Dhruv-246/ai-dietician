@@ -18,7 +18,7 @@ STORED AS DATA, RENDERED ON DEMAND.
     plan_pdf. Nothing binary is stored, a download is always current, and
     changing one day is a JSON edit rather than a file rewrite.
 
-TABLE (run once in the Supabase SQL editor):
+TABLES (run once in the Supabase SQL editor):
 
     create table if not exists diet_plans (
       firebase_uid text primary key,
@@ -27,6 +27,18 @@ TABLE (run once in the Supabase SQL editor):
       updated_at   timestamptz default now()
     );
     alter table diet_plans enable row level security;
+
+    -- Preferences stated in chat, banked until the next build consumes them.
+    create table if not exists plan_preferences (
+      id           bigserial primary key,
+      firebase_uid text not null,
+      note         text not null,
+      created_at   timestamptz default now(),
+      applied_at   timestamptz
+    );
+    create index if not exists plan_preferences_pending
+      on plan_preferences (firebase_uid, applied_at);
+    alter table plan_preferences enable row level security;
 
     -- The service key bypasses RLS. Leaving RLS on with no policy means
     -- nothing else can read these rows, which is what we want: a diet plan
@@ -487,8 +499,8 @@ async def generate(profile: dict, memory: dict, *, start: str = "",
 # ------------------------------------------------- chat-driven plan edits --
 # Cheap prefilter. Regenerating a week costs a minute and several model calls,
 # so a keyword gate runs first and the LLM only judges messages that could
-# plausibly be about the plan. Everything here is a HINT -- `wants_change`
-# makes the actual call.
+# plausibly be about the plan. Everything here is a HINT -- `classify` makes
+# the actual call.
 _PLAN_WORDS = ["plan", "chart", "pdf", "diet", "khana", "khaana", "meal",
                "breakfast", "lunch", "dinner", "nashta", "snack"]
 _CHANGE_WORDS = ["change", "badal", "badl", "replace", "hata", "nahi mil",
@@ -528,43 +540,57 @@ def maybe_plan_change(text: str) -> bool:
 
 
 _CHANGE_SYSTEM = """\
-Decide whether the user is asking to CHANGE their written diet plan.
+Read one message from a diet-plan user and decide which of three things it is.
 
 Return JSON only:
-{"change": true|false, "scope": "day"|"meal"|"week", "instruction": "..."}
+{"kind": "update_request" | "preference" | "none", "note": "..."}
 
-`change` is true for a request to alter the plan -- a food they cannot get,
-do not like, or must avoid; a day that does not work; a timing that is wrong.
+"update_request" -- they are ASKING for the written plan/PDF to be rebuilt or
+changed NOW. In any phrasing: "plan update kar do", "naya diet chart bhejo",
+"pdf update karo", "monday ka change kar do", "plan dobara banao", "diet plan
+badal do", "new plan chahiye". The giveaway is a request aimed at the PLAN or
+the PDF, not just a statement about food.
 
-It is ALSO true when they STATE a change in what they eat, even as plain
-information rather than a request. "Main ab egg khana shuru kar raha hoon",
-"mujhe peanuts se allergy hai", "ab main non-veg chhod raha hoon" all change
-what belongs in the plan. They should not have to ask twice.
+"preference" -- they told us something that should shape their NEXT plan, but
+did not ask for it to be rebuilt. "Mujhe roti nahi khani ab", "main ab egg
+khana shuru kar raha hoon", "mujhe peanuts se allergy hai", "breakfast bahut
+heavy lagta hai", "sunday ko main bahar rehta hoon". Real and worth keeping --
+just not a request to act right now.
 
-TENSE DECIDES the skip cases. "Kal ka dinner miss ho gaya" is a report about
-a day that has passed and changes nothing. "Sunday ko main bahar hoon, dinner
-skip" is about a day still ahead, and the plan for that day should change.
+"none" -- everything else. Asking what is in the plan, general food or
+nutrition questions, saying a meal WAS good or bad, reporting a meal they
+already missed, worrying about progress, small talk.
 
-It is FALSE for: asking what is in the plan, general food or nutrition
-questions, saying a meal WAS good or bad after eating it, reporting a meal
-they already missed, worrying about progress, small talk, or anything
-unrelated to what the plan should contain.
+TENSE matters for the skip cases. "Kal ka dinner miss ho gaya" is a report
+about a day gone: none. "Sunday ko main bahar hoon" is a standing fact about
+their week: preference.
 
-`instruction` is one plain sentence a dietician could act on, naming the day
-and meal if the user did. Write it in English.
+`note` is one plain English sentence a dietician could act on, naming the day
+and meal if the user did. Empty for "none".
 """
 
 
-async def wants_change(text: str, recent: str = "") -> dict:
-    """LLM judgement on a message the prefilter let through."""
+async def classify(text: str, recent: str = "") -> dict:
+    """What is this message: a request to rebuild, a preference, or neither?
+
+    Split deliberately. Rebuilding on every stated preference means the plan
+    changes under the user without them asking; ignoring preferences means
+    they have to repeat themselves when they finally do ask. So preferences
+    are BANKED and applied at the next build.
+    """
     if not maybe_plan_change(text):
-        return {"change": False}
+        return {"kind": "none", "note": ""}
     data = await llm_client.complete_json(
         _CHANGE_SYSTEM,
         json.dumps({"message": text, "recent_context": recent[-800:]},
                    ensure_ascii=False),
         kind="fast", max_tokens=250, temperature=0.0, timeout=8.0)
-    return data if isinstance(data, dict) else {"change": False}
+    if not isinstance(data, dict):
+        return {"kind": "none", "note": ""}
+    kind = str(data.get("kind") or "none").strip().lower()
+    if kind not in ("update_request", "preference", "none"):
+        kind = "none"
+    return {"kind": kind, "note": str(data.get("note") or "").strip()[:400]}
 
 
 _AMEND_SYSTEM = """\
@@ -668,6 +694,94 @@ async def amend(plan: dict, instruction: str, *, diet: str = "",
     log(f"amend applied to {len(applied)} meal(s): {applied}")
     reply = str((data or {}).get("reply") or "").strip()
     return draft, reply
+
+
+# ------------------------------------------------------ preference ledger --
+# Append-only, like the fact ledger. A preference is banked when the user
+# states it and CONSUMED at the next build -- Sunday's, or one they ask for.
+#
+# The alternative, rebuilding the moment anyone mentions a food, changes the
+# plan under the user without them asking for it. Banking means "mujhe roti
+# nahi khani" is remembered and honoured next Sunday without a surprise PDF
+# appearing today.
+PREFS_TABLE = os.getenv("PLAN_PREFS_TABLE", "plan_preferences")
+
+
+def _prefs_url():
+    return os.getenv("SUPABASE_URL", "").rstrip("/") + f"/rest/v1/{PREFS_TABLE}"
+
+
+async def add_preference(uid: str, note: str, log=None) -> bool:
+    """Bank one preference for the next build."""
+    log = log or (lambda m: None)
+    if not enabled() or not uid or not _norm(note):
+        return False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+            r = await c.post(_prefs_url(), headers=_headers(),
+                             json={"firebase_uid": uid, "note": str(note)[:400]})
+            r.raise_for_status()
+        log(f"plan preference banked: {str(note)[:80]}")
+        return True
+    except Exception as exc:
+        log(f"plan preference save failed: {type(exc).__name__}: {exc}")
+        return False
+
+
+async def pending_preferences(uid: str, log=None) -> list:
+    """Everything banked and not yet applied, oldest first."""
+    log = log or (lambda m: None)
+    if not enabled() or not uid:
+        return []
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+            r = await c.get(_prefs_url(), headers=_headers(),
+                            params={"firebase_uid": f"eq.{uid}",
+                                    "applied_at": "is.null",
+                                    "order": "created_at.asc",
+                                    "select": "id,note", "limit": "40"})
+            r.raise_for_status()
+            return r.json() or []
+    except Exception as exc:
+        log(f"plan preference load failed: {type(exc).__name__}: {exc}")
+        return []
+
+
+async def mark_applied(uid: str, ids: list, log=None) -> bool:
+    """Consume preferences once a plan has actually been built with them.
+
+    Marked only AFTER a successful build, so a failed generation leaves them
+    pending rather than silently dropping what the user asked for.
+    """
+    log = log or (lambda m: None)
+    if not enabled() or not uid or not ids:
+        return False
+    try:
+        import httpx
+        idlist = ",".join(str(int(i)) for i in ids)
+        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+            r = await c.patch(
+                _prefs_url(), headers=_headers({"Prefer": "return=minimal"}),
+                params={"firebase_uid": f"eq.{uid}", "id": f"in.({idlist})"},
+                json={"applied_at": dt.datetime.now(dt.timezone.utc).isoformat()})
+            r.raise_for_status()
+        log(f"plan preferences applied: {len(ids)}")
+        return True
+    except Exception as exc:
+        log(f"plan preference mark failed: {type(exc).__name__}: {exc}")
+        return False
+
+
+def prefs_text(rows) -> str:
+    """Render banked preferences for a plan prompt."""
+    notes = [str((r or {}).get("note") or "").strip() for r in (rows or [])]
+    notes = [n for n in notes if n]
+    if not notes:
+        return ""
+    return ("Things this user has told us since their last plan. Honour ALL "
+            "of them:\n" + "\n".join(f"- {n}" for n in notes))
 
 
 # ---------------------------------------------------------------- storage --
