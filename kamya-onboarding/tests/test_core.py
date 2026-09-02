@@ -1647,6 +1647,17 @@ def test_diet_plan_validation():
     ck("dairy rejected for vegan", bad("Paneer tikka", "vegan"))
     ck("dairy fine for vegetarian", not bad("Paneer tikka", "vegetarian"))
     ck("onion rejected for jain", bad("Onion sabzi", "jain vegetarian"))
+    # Jain excludes ROOT vegetables, not just the famous three. This banned
+    # only onion, garlic and potato, and Jain plans shipped carrot and
+    # beetroot until the preference judge flagged them.
+    for veg, name in (("steamed carrot", "carrot"), ("beetroot salad", "beetroot"),
+                      ("mooli paratha", "mooli"), ("sweet potato chaat", "sweet potato"),
+                      ("arbi masala", "arbi")):
+        ck(f"jain rejects {name}", bad(veg, "jain vegetarian"))
+    ck("jain still allows ordinary food",
+       not bad("Moong dal khichdi with turmeric", "jain vegetarian"))
+    ck("root vegetables are fine for everyone else",
+       not bad("Carrot halwa", "vegetarian"))
 
     # The model names plant milks and millet flours precisely; punishing that
     # precision made it retry a correct plan until it ran out of attempts.
@@ -1680,6 +1691,69 @@ def test_diet_plan_validation():
     ck("problems carry a day and meal index",
        all({"day", "meal", "msg"} <= set(p)
            for p in dpl.check(_meal("Chicken curry"), "veg", [])))
+
+
+def test_preference_extraction_and_compliance_prompts():
+    """Two model jobs whose boundaries were learned the hard way.
+
+    Extraction pulls diet preferences out of the onboarding call so they are
+    banked like any other. Compliance checks the finished plan against them
+    -- and the first version of it invented rules, claiming coconut milk was
+    dairy and tomato banned for Jains, then blocked the build entirely.
+    """
+    ex = " ".join(dpl._EXTRACT_SYSTEM.split())
+    ck("extraction covers what may appear and when",
+       "allergies" in ex and "religious or fasting" in ex
+       and "when they actually eat" in ex)
+    ck("extraction leaves non-food facts alone",
+       "EXCLUDE" in ex and "lose 8 kg" in ex)
+    ck("each preference is specific enough to act on",
+       "No wheat or roti" in ex)
+
+    cm = " ".join(dpl._COMPLY_SYSTEM.split())
+    ck("the judge checks words, not nutrition theory",
+       "not a nutritionist here" in cm and "not adding rules" in cm)
+    ck("plant milks are never a dairy violation",
+       "coconut milk, almond milk and soy milk" in cm and "NO dairy" in cm)
+    ck("inventing a food category is called out",
+       "tomato is a nightshade" in cm and "spinach is cruciferous" in cm)
+    ck("guessing hidden ingredients is called out",
+       "khichdi usually has potato" in cm)
+    ck("it must cite the preference it is enforcing", '"preference"' in cm)
+    ck("silence is the expected answer", "the normal answer" in cm)
+
+
+def test_preference_verdicts_are_not_fatal():
+    """Code blocks; judgement does not.
+
+    Diet type and allergies are checked in code and a plan failing them is
+    never returned. Freeform preferences are judged by a model that has been
+    wrong, so its verdicts are repaired but must never stop a plan being
+    produced -- honouring six of seven preferences beats no plan at all.
+    """
+    src = open(os.path.join(os.path.dirname(__file__), "..", "diet_plan.py"),
+               encoding="utf-8").read()
+    gen = src[src.index("async def generate("):
+              src.index("# ------------------------------------------- does the plan honour them all --")]
+    # The gate that decides whether a plan is returned must read from the
+    # CODE check. If a judge verdict could ever reach it, a hallucinating
+    # judge means no plan at all.
+    tail = gen[gen.index("for r in range(1, max(0, repairs) + 1):\n            if not prefs:"):]
+    ck("a judge verdict never reaches the return gate",
+       "problems = check(data, diet, allergies)" in tail
+       and "problems = await check_preferences" not in gen
+       and "problems += await check_preferences" not in gen)
+    ck("preference repair runs only after the safety check has passed",
+       gen.index("if not prefs:") > gen.index("still unsafe after"))
+
+    am = src[src.index("async def amend("):src.index("# ------------------------------------------------------ preference ledger --")]
+    ck("amend applies the same two tiers",
+       "raise RuntimeError(f\"amended plan still unsafe" in am
+       and am.index("broken = await check_preferences") > am.index("amended plan still unsafe"))
+    ck("a preference repair cannot smuggle in an unsafe meal",
+       "must not smuggle in an unsafe meal" in gen)
+    ck("a runaway verdict is dropped rather than repaired on",
+       "as unreliable" in src)
 
 
 def test_diet_plan_shape_and_dates():
@@ -2104,7 +2178,9 @@ def main():
                test_register_and_banned_words, test_offtopic_bridge,
                test_reply_shape,
                test_diet_plan_validation, test_diet_plan_shape_and_dates,
-               test_diet_plan_note_hygiene, test_plan_change_prefilter,
+               test_diet_plan_note_hygiene,
+               test_preference_extraction_and_compliance_prompts,
+               test_preference_verdicts_are_not_fatal, test_plan_change_prefilter,
                test_plan_pdf_renders, test_plan_trigger_contract,
                test_plan_change_prompt_boundaries,
                test_plan_preference_rendering, test_plan_card_in_chat,

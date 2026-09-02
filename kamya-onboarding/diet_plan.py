@@ -70,6 +70,17 @@ _NON_VEGAN = _NON_VEG + ["milk", "curd", "dahi", "paneer", "cheese", "ghee",
                          "buttermilk", "chaas", "khoya", "malai", "honey"]
 _EGG = ["egg", "anda", "omelette", "omelet", "bhurji"]
 
+# Jain excludes ROOT vegetables, not just the famous three. This listed only
+# onion, garlic and potato, and Jain plans were shipping carrot and beetroot
+# until the preference judge flagged them. Fresh ginger is out too; dried
+# turmeric and ginger POWDER are accepted and deliberately absent here.
+_JAIN_BANNED = ["onion", "pyaz", "pyaaz", "garlic", "lehsun", "lasun",
+                "potato", "aloo", "carrot", "gajar", "beetroot", "chukandar",
+                "radish", "mooli", "turnip", "shalgam", "sweet potato",
+                "shakarkandi", "yam", "suran", "jimikand", "arbi",
+                "colocasia", "tapioca", "leek", "spring onion", "scallion",
+                "shallot", "fresh ginger", "beet"]
+
 
 def _norm(s) -> str:
     return re.sub(r"\s+", " ", str(s or "")).strip().lower()
@@ -223,7 +234,7 @@ def check(plan: dict, diet: str, allergies) -> list:
     elif "veg" in diet_l and "non" not in diet_l:
         banned = _NON_VEG
     if "jain" in diet_l:
-        banned = banned + ["onion", "garlic", "pyaz", "lehsun", "potato", "aloo"]
+        banned = banned + _JAIN_BANNED
 
     allergy_words = []
     for a in (allergies if isinstance(allergies, list) else [allergies]):
@@ -298,6 +309,10 @@ HARD RULES -- a plan breaking any of these is rejected by code, not by me:
   5. Ordinary Indian home food they can actually get. No supplements, no
      exotic imports, nothing that needs a special shop.
   6. Vary the days. Seven identical days is not a plan.
+  7. Obey EVERY line under special_instructions. Those are things this user
+     has told us directly -- on their call or in chat -- about what they will
+     and will not eat, and when. They are not suggestions to weigh up. A plan
+     that ignores one is rejected and sent back to you.
 
 MEDICAL BOUNDARY
   If they have a condition, keep the plan conservative and ordinary, and put
@@ -417,8 +432,8 @@ async def _repair(plan: dict, problems: list, diet: str, allergies,
 
 
 async def generate(profile: dict, memory: dict, *, start: str = "",
-                   extra_notes: str = "", attempts: int = 2,
-                   repairs: int = 3, log=None) -> dict:
+                   extra_notes: str = "", prefs: list = None,
+                   attempts: int = 2, repairs: int = 3, log=None) -> dict:
     """Build a validated 7-day plan. Raises if it cannot produce a safe one.
 
     Two loops, because the two failure kinds are different. A malformed plan
@@ -464,6 +479,16 @@ async def generate(profile: dict, memory: dict, *, start: str = "",
             log(f"plan attempt {attempt}: bad shape -- {last}")
             continue
 
+        # TWO TIERS, and the difference matters.
+        #
+        # `check` is code: diet type and allergies. Getting those wrong is
+        # unsafe, so a plan that fails it is never returned.
+        #
+        # `check_preferences` is a model judging freeform wishes. It is
+        # useful but fallible -- it has claimed coconut milk is dairy and
+        # that tomato is banned for Jains. So its verdicts are REPAIRED but
+        # never fatal: a plan honouring six of seven preferences beats no
+        # plan at all.
         problems = check(data, diet, allergies)
         for r in range(1, max(0, repairs) + 1):
             if not problems:
@@ -472,6 +497,26 @@ async def generate(profile: dict, memory: dict, *, start: str = "",
                 f"first: {problems[0]['msg']}")
             data = await _repair(data, problems, diet, allergies, log=log)
             problems = check(data, diet, allergies)
+        if problems:
+            last = "\n".join(f"- {q['msg']}" for q in problems[:10])
+            log(f"attempt {attempt} still unsafe after {repairs} repairs")
+            continue
+
+        for r in range(1, max(0, repairs) + 1):
+            if not prefs:
+                break
+            broken = await check_preferences(data, prefs, log=log)
+            if not broken:
+                break
+            log(f"preference repair {r}: {len(broken)}; first: {broken[0]['msg']}")
+            data = await _repair(data, broken, diet, allergies, log=log)
+            # A preference repair must not smuggle in an unsafe meal.
+            regressed = check(data, diet, allergies)
+            if regressed:
+                data = await _repair(data, regressed, diet, allergies, log=log)
+                if check(data, diet, allergies):
+                    break
+        problems = check(data, diet, allergies)
 
         if not problems:
             for day in data["days"]:
@@ -490,7 +535,6 @@ async def generate(profile: dict, memory: dict, *, start: str = "",
             return data
 
         last = "\n".join(f"- {q['msg']}" for q in problems[:10])
-        log(f"attempt {attempt} still unsafe after {repairs} repairs")
 
     raise RuntimeError(f"could not produce a safe plan after {attempts} "
                        f"attempt(s). Last problems:\n{last}")
@@ -642,7 +686,7 @@ def _index(plan: dict) -> list:
 
 
 async def amend(plan: dict, instruction: str, *, diet: str = "",
-                allergies=None, log=None) -> tuple:
+                allergies=None, prefs: list = None, log=None) -> tuple:
     """Apply one targeted change to an existing plan. Returns (plan, reply).
 
     Deliberately NOT a regeneration. Rebuilding the week because Monday's dal
@@ -687,6 +731,8 @@ async def amend(plan: dict, instruction: str, *, diet: str = "",
     if not applied:
         raise RuntimeError("no edit could be applied")
 
+    # Same two tiers as generate: the code check can reject the edit, the
+    # preference judge can only ask for another pass at it.
     problems = check(draft, diet, allergies)
     for r in range(1, 3):
         if not problems:
@@ -696,6 +742,23 @@ async def amend(plan: dict, instruction: str, *, diet: str = "",
         problems = check(draft, diet, allergies)
     if problems:
         raise RuntimeError(f"amended plan still unsafe: {problems[0]['msg']}")
+
+    for r in range(1, 3):
+        if not prefs:
+            break
+        broken = await check_preferences(draft, prefs, log=log)
+        if not broken:
+            break
+        log(f"amend preference repair {r}: {broken[0]['msg']}")
+        draft = await _repair(draft, broken, diet, allergies, log=log)
+        if check(draft, diet, allergies):
+            # The preference fix broke a hard rule. Keep the safe version.
+            log("amend: preference repair regressed safety, reverting it")
+            draft = await _repair(draft, check(draft, diet, allergies),
+                                  diet, allergies, log=log)
+            if check(draft, diet, allergies):
+                raise RuntimeError("amended plan unsafe after preference fix")
+            break
 
     for day in draft.get("days") or []:
         for meal in day.get("meals") or []:
@@ -726,6 +789,14 @@ async def add_preference(uid: str, note: str, log=None) -> bool:
     if not enabled() or not uid or not _norm(note):
         return False
     try:
+        existing = await pending_preferences(uid, log=log)
+        here = _norm(note)
+        for row in existing:
+            there = _norm((row or {}).get("note"))
+            if here == there or (len(here) > 12 and here in there) \
+                    or (len(there) > 12 and there in here):
+                log(f"plan preference already banked, skipped: {here[:60]}")
+                return True
         import httpx
         async with httpx.AsyncClient(timeout=TIMEOUT) as c:
             r = await c.post(_prefs_url(), headers=_headers(),
@@ -791,6 +862,144 @@ def prefs_text(rows) -> str:
         return ""
     return ("Things this user has told us since their last plan. Honour ALL "
             "of them:\n" + "\n".join(f"- {n}" for n in notes))
+
+
+# ---------------------------------------------- preferences from the call --
+_EXTRACT_SYSTEM = """\
+You are reading everything known about a user after their onboarding call.
+Pull out every DIET PREFERENCE that must shape their written meal plan.
+
+Return JSON only:
+{"preferences": ["one plain English sentence each", ...]}
+
+INCLUDE anything that changes what may appear in the plan, or when:
+  - what they will not eat: vegetarian, no onion or garlic, no beef, no eggs
+  - allergies and intolerances, in any wording
+  - foods they dislike or are bored of
+  - foods a condition requires them to limit -- diabetes, BP, PCOS, thyroid
+  - religious or fasting patterns, and which days
+  - when they actually eat: shift work, late dinners, skipped breakfasts
+  - what they cannot get or cook: hostel, no kitchen, travels, eats out
+  - texture, spice or portion needs
+
+EXCLUDE: their goal ("lose 8 kg"), their symptoms, their measurements, their
+job, and anything not about food or timing. Those are recorded elsewhere.
+
+Each preference is ONE sentence, specific enough to act on. Write "No wheat
+or roti - user is gluten intolerant", not "has some dietary restrictions".
+Return an empty list if there is genuinely nothing.
+"""
+
+
+async def extract_preferences(profile: dict, memory: dict, log=None) -> list:
+    """Diet preferences stated during the onboarding call.
+
+    These already sit in long-term memory, but only as CONTEXT the plan prompt
+    may or may not honour. Pulling them into the preference ledger makes them
+    the same kind of thing as a preference stated in chat: banked, applied at
+    every build, and checked against the finished plan.
+    """
+    log = log or (lambda m: None)
+    ltm = (memory or {}).get("long_term_memory") or {}
+    if not ltm:
+        return []
+    ask = json.dumps({
+        "what_we_know": ltm,
+        "open_loops": (memory or {}).get("open_loops") or [],
+        "profile": {k: v for k, v in (profile or {}).items() if str(v).strip()},
+    }, ensure_ascii=False)[:6000]
+    data = await llm_client.complete_json(
+        _EXTRACT_SYSTEM, ask, kind="heavy", max_tokens=1200, temperature=0.0,
+        timeout=60.0)
+    out = []
+    for p in (data or {}).get("preferences") or []:
+        p = re.sub(r"\s+", " ", str(p)).strip()
+        if 4 < len(p) <= 400:
+            out.append(p)
+    log(f"onboarding preferences extracted: {len(out)}")
+    return out
+
+
+# ------------------------------------------- does the plan honour them all --
+_COMPLY_SYSTEM = """\
+Check a finished weekly diet plan against the user's OWN stated preferences.
+
+You get the preferences and every meal, numbered. Return JSON only:
+{"violations": [{"day": 0, "meal": 2,
+                 "preference": "the exact preference line it breaks",
+                 "why": "the meal contains X, which that line rules out"}]}
+
+You are checking against WHAT THE USER SAID, and nothing else. You are not a
+nutritionist here and you are not adding rules.
+
+Flag a meal ONLY when a named item in it is plainly covered by the words of a
+preference -- "no onion" and the meal lists onion; "no wheat" and the meal
+lists roti; "dislikes karela" and the meal lists karela.
+
+DO NOT flag on reasoning of your own. All of these are wrong:
+  - deciding a food belongs to a category the user never mentioned
+    ("tomato is a nightshade", "spinach is cruciferous")
+  - treating a plant food as dairy (coconut milk, almond milk and soy milk
+    contain NO dairy and never break a dairy or lactose preference)
+  - guessing at a dish's hidden ingredients ("khichdi usually has potato")
+  - anything about preparation effort, calories, balance or variety
+  - a preference the plan simply does not touch
+
+If you cannot point at a specific item in the meal and the specific words of a
+preference that rule it out, it is NOT a violation. When unsure, allow it.
+
+Most plans have zero violations. {"violations": []} is the normal answer.
+"""
+
+
+async def check_preferences(plan: dict, prefs: list, log=None) -> list:
+    """LLM judgement on the freeform preferences code cannot check.
+
+    Diet type and allergies are checked in code, because they are the ones
+    that must never be wrong. But "no onion", "away on Sundays" and "light
+    breakfasts" have no clean rule, and a preference nobody verifies is a
+    preference the plan is free to ignore. So they are judged, and the
+    verdicts feed the same repair loop as the structural failures.
+    """
+    log = log or (lambda m: None)
+    notes = [n for n in (prefs or []) if str(n).strip()]
+    if not notes or not (plan or {}).get("days"):
+        return []
+    ask = json.dumps({"preferences": notes, "meals": _index(plan)},
+                     ensure_ascii=False)
+    data = await llm_client.complete_json(
+        _COMPLY_SYSTEM, ask, kind="heavy", max_tokens=1500, temperature=0.0,
+        timeout=90.0)
+    out = []
+    for v in (data or {}).get("violations") or []:
+        try:
+            di, mi = int(v["day"]), int(v["meal"])
+            plan["days"][di]["meals"][mi]
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        where = plan["days"][di].get("weekday", f"day {di + 1}")
+        slot = plan["days"][di]["meals"][mi].get("slot", "")
+        why = str(v.get("why") or "breaks a stated preference")[:160]
+        pref = str(v.get("preference") or "").strip()[:120]
+        out.append(_p(di, mi, f"{where}/{slot}: {why}"
+                              + (f" (stated: {pref})" if pref else "")))
+
+    # A judge that flags most of the week is reasoning rather than checking.
+    # Repairing on that produces a worse plan than the one it is replacing,
+    # so the whole verdict is dropped and the plan stands as generated.
+    # A judge flagging MOST of the week has stopped checking and started
+    # theorising, and repairing on that yields a worse plan than the one it
+    # replaces. Set high on purpose: at a quarter this threw away a verdict
+    # that was entirely correct -- carrot and beetroot really are root
+    # vegetables, and the Jain list in code was the thing at fault.
+    total = sum(len(d.get("meals") or []) for d in plan["days"])
+    if total and len(out) > max(6, total * 2 // 3):
+        log(f"preference judge flagged {len(out)}/{total} meals -- ignoring "
+            f"the verdict as unreliable")
+        return []
+    if out:
+        log(f"preference violations found: {len(out)}; first: {out[0]['msg']}")
+    return out
 
 
 # ---------------------------------------------------------------- storage --

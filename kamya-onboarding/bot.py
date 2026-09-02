@@ -2096,6 +2096,7 @@ async def _maybe_update_plan(uid, profile, memory, text):
 
         plan = await diet_plan.load(uid, log=_log) or _PLAN_CACHE.get(uid)
         pend = await diet_plan.pending_preferences(uid, log=_log)
+        pref_lines = [str((r or {}).get("note") or "") for r in pend]
         # The request itself is the newest instruction, ahead of the backlog.
         notes = "\n".join(filter(None, [
             f"They have just asked for this: {note}",
@@ -2108,12 +2109,12 @@ async def _maybe_update_plan(uid, profile, memory, text):
             try:
                 if plan and plan.get("week_start") == diet_plan.week_start():
                     updated, reply = await diet_plan.amend(
-                        plan, notes, log=_log)
+                        plan, notes, prefs=pref_lines, log=_log)
                 else:
                     # No current plan to amend -- build this week's outright.
                     updated = await diet_plan.generate(
                         profile, memory, start=diet_plan.week_start(),
-                        extra_notes=notes, log=_log)
+                        extra_notes=notes, prefs=pref_lines, log=_log)
                     reply = ""
                 await diet_plan.save(uid, updated, log=_log)
                 _PLAN_CACHE[uid] = updated
@@ -2185,13 +2186,15 @@ async def _ensure_plan(uid, profile, memory, *, week="", force=False,
         # whole point of banking them: a preference stated on Tuesday has to
         # show up in Sunday's plan without the user repeating it.
         pend = await diet_plan.pending_preferences(uid, log=_log)
+        pref_lines = [str((r or {}).get("note") or "") for r in pend]
         notes = "\n".join(filter(None, [notes, diet_plan.prefs_text(pend)]))
         _log(f"plan: generating uid={uid[:8]} week={week} force={force} "
              f"banked_prefs={len(pend)}")
         _PLAN_BUILDING.add(uid)
         try:
             plan = await diet_plan.generate(profile, memory, start=week,
-                                            extra_notes=notes, log=_log)
+                                            extra_notes=notes,
+                                            prefs=pref_lines, log=_log)
             stored = await diet_plan.save(uid, plan, log=_log)
         finally:
             _PLAN_BUILDING.discard(uid)
@@ -2215,6 +2218,23 @@ async def _plan_after_onboarding(uid: str):
         if not ok:
             _log(f"plan after onboarding: uid={uid[:8]} not eligible yet")
             return
+        # Everything they told us on the call about food and timing, banked
+        # as preferences before the first plan is built. They are already in
+        # long-term memory, but only as context the prompt might honour --
+        # in the ledger they are applied at every build and verified against
+        # the finished plan.
+        try:
+            found = await diet_plan.extract_preferences(profile, memory,
+                                                        log=_log)
+            for note in found:
+                await diet_plan.add_preference(uid, note, log=_log)
+            if found:
+                _log(f"onboarding preferences banked uid={uid[:8]}: "
+                     f"{len(found)}")
+        except Exception as exc:
+            _log(f"onboarding preference extraction failed uid={uid[:8]}: "
+                 f"{type(exc).__name__}: {exc}")
+
         existing = await diet_plan.load(uid, log=_log)
         if existing and existing.get("week_start") == diet_plan.week_start():
             return
