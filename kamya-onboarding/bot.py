@@ -2317,15 +2317,21 @@ async def _weekly_plan_sweep():
         if not ok:
             continue
         try:
-            await _ensure_plan(
-                uid, profile, memory, week=week, force=True,
+            # force=False on purpose. The in-memory day tag above does not
+            # survive a restart, so a redeploy on Sunday evening would run
+            # this sweep a second time -- rebuilding a plan that already
+            # exists and announcing it twice. _ensure_plan returns the stored
+            # plan untouched when the week already matches, which makes the
+            # sweep safe to run any number of times.
+            _plan, made = await _ensure_plan(
+                uid, profile, memory, week=week,
                 announce=("Agle hafte ka aapka naya diet plan taiyaar hai. "
                           "Menu se PDF download kar lijiye."))
-            done += 1
+            done += made
         except Exception as exc:
             _log(f"plan sweep failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
         await asyncio.sleep(2)     # do not stampede the model
-    _log(f"plan sweep finished: {done} plan(s) refreshed for week {week}")
+    _log(f"plan sweep finished: {done} new plan(s) built for week {week}")
 
 
 @app.on_event("startup")

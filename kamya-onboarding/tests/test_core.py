@@ -1766,6 +1766,92 @@ def test_plan_pdf_renders():
        plan_pdf._pretty("not a date") == "not a date")
 
 
+def test_plan_trigger_contract():
+    """A new PDF -- and an announcement -- only on the three real triggers.
+
+    Stated by the user as the rule for this feature: the plan is built when
+    the onboarding call ends, when they ask for a change, and on Sunday for
+    the new week. Tapping the menu downloads what exists; it must not rebuild
+    and must not announce.
+
+    _ensure_plan lives in bot.py, which imports pipecat. Rather than skip the
+    test that covers the actual rule, the two functions are lifted out by AST
+    and run against a fake store.
+    """
+    import ast as _ast
+    import asyncio as _aio
+    import diet_plan as _dp
+
+    src = open(os.path.join(os.path.dirname(__file__), "..", "bot.py"),
+               encoding="utf-8").read()
+    wanted = {"_plan_lock", "_ensure_plan"}
+    chunks = [_ast.get_source_segment(src, n) for n in _ast.parse(src).body
+              if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+              and n.name in wanted]
+    if len(chunks) != len(wanted):
+        ck("plan trigger contract", False,
+           f"could not lift {wanted} out of bot.py")
+        return
+
+    announced = []
+    async def _announce(uid, profile, memory, text):
+        announced.append(text)
+    ns = {"asyncio": _aio, "diet_plan": _dp, "_PLAN_LOCKS": {},
+          "_PLAN_BUILDING": set(), "_log": lambda m: None,
+          "_plan_announce": _announce}
+    for c in chunks:
+        exec(c, ns)                                        # noqa: S102
+    ensure = ns["_ensure_plan"]
+
+    store, built = {}, []
+    real = (_dp.load, _dp.save, _dp.generate)
+    async def _load(uid, log=None): return store.get(uid)
+    async def _save(uid, plan, log=None): store[uid] = plan; return True
+    async def _gen(profile, memory, *, start="", extra_notes="", log=None, **kw):
+        built.append(start)
+        return {"week_start": start, "days": [], "basics": {}}
+    _dp.load, _dp.save, _dp.generate = _load, _save, _gen
+
+    CUR, NXT, SAY = "2026-09-07", "2026-09-14", "plan ready"
+    try:
+        async def run():
+            await ensure("u1", {}, {}, week=CUR, announce=SAY)
+            ck("onboarding forms the first plan", built == [CUR])
+            ck("onboarding announces it", len(announced) == 1)
+
+            for _ in range(3):
+                await ensure("u1", {}, {}, week=CUR, announce=SAY)
+            ck("tapping download never rebuilds", built == [CUR])
+            ck("tapping download never announces", len(announced) == 1)
+
+            await ensure("u1", {}, {}, week=NXT, announce=SAY)
+            ck("the sunday sweep builds the new week", built == [CUR, NXT])
+            ck("the sunday sweep announces", len(announced) == 2)
+
+            # The sweep's "already ran" marker is in memory, so a restart on
+            # Sunday evening runs it again. It must be a no-op.
+            await ensure("u1", {}, {}, week=NXT, announce=SAY)
+            ck("a repeated sweep does not rebuild", built == [CUR, NXT])
+            ck("a repeated sweep does not announce again", len(announced) == 2)
+
+            await ensure("u1", {}, {}, week=NXT, force=True,
+                         notes="no dal on monday", announce="updated")
+            ck("an explicit change rebuilds", built == [CUR, NXT, NXT])
+            ck("an explicit change announces", len(announced) == 3)
+
+            store.clear(); built.clear()
+            await _aio.gather(*[ensure("u2", {}, {}, week=CUR, announce=SAY)
+                                for _ in range(4)])
+            ck("two taps at once build exactly once", built == [CUR])
+        _aio.run(run())
+    finally:
+        _dp.load, _dp.save, _dp.generate = real
+        # asyncio.run() closes the loop it made and leaves none installed.
+        # A later test in this file uses get_event_loop(), which raises on
+        # 3.9 once that has happened -- so put a fresh one back.
+        _aio.set_event_loop(_aio.new_event_loop())
+
+
 def test_reply_shape():
     # Tokens arrive in small pieces, so every rule has to hold mid-chunk.
     spoken, sh = _shape(["अच्छा", ", दिल्ली", " में! और work", " क्या करते हैं", " आप?"])
@@ -1915,7 +2001,7 @@ def main():
                test_reply_shape,
                test_diet_plan_validation, test_diet_plan_shape_and_dates,
                test_diet_plan_note_hygiene, test_plan_change_prefilter,
-               test_plan_pdf_renders,
+               test_plan_pdf_renders, test_plan_trigger_contract,
                test_prompt_invariants,
                test_bedrock_falls_back):
         fn()

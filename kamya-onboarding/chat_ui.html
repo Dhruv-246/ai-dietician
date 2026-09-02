@@ -227,9 +227,12 @@ async function refreshPlanHint(){
     const r = await fetch(`/plan/status?uid=${encodeURIComponent(UID)}`);
     if (!r.ok) return;
     const j = await r.json();
+    // Ready is the normal case: the plan is built when the onboarding call
+    // ends, when the user asks for a change, and on Sunday night. Tapping
+    // here only ever downloads what already exists.
     planHint.textContent = j.building ? 'ban raha hai...'
-                         : j.ready    ? 'is hafte ka plan taiyaar hai'
-                         :              'pehli baar mein ~1 minute lagega';
+                         : j.ready    ? 'download karein'
+                         :              'abhi taiyaar nahi hai';
   } catch (e) {}
 }
 
@@ -237,7 +240,7 @@ planBtn.addEventListener('click', async () => {
   if (planBusy) return;
   planBusy = true;
   planBtn.disabled = true;
-  planHint.textContent = 'ban raha hai...';
+  planHint.textContent = 'download ho raha hai...';
   try {
     const r = await fetch(`/plan.pdf?uid=${encodeURIComponent(UID)}`);
     if (!r.ok){
