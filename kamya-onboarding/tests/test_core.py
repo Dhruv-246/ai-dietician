@@ -1214,6 +1214,50 @@ def test_chat_survives_a_restart():
     ck("the store is optional", chat_store.enabled() in (True, False))
 
 
+def test_landing_route_respects_the_requested_step():
+    """After the manual form, the user must get the CALL, not chat.
+
+    The web app's router already decides which step someone is on and encodes
+    it in the URL:
+        ?uid=...              step 2, the onboarding call
+        ?uid=...&mode=ongoing step 3, the ongoing product
+    This route ignored `mode` and sent anyone with onboarding_call_done=TRUE
+    to chat -- including when the web app had explicitly asked for the
+    onboarding call. Finishing the manual form dropped you straight into chat,
+    skipping the call that is the only thing that seeds memory.
+    """
+    import pathlib
+    bot = (pathlib.Path(chat_engine.__file__).with_name("bot.py")
+           ).read_text(encoding="utf-8")
+
+    ck("the route reads mode", 'request.query_params.get("mode")' in bot)
+    ck("chat is only for an explicit ongoing request",
+       'if mode == "ongoing" and not wants_call' in bot)
+    ck("?screen=call still forces the call screen", "wants_call" in bot)
+
+    # The eligibility check must sit INSIDE the ongoing branch. Outside it,
+    # the flag decides everything again and mode is decorative.
+    seg = bot[bot.index("RESPECT THE MODE"):]
+    seg = seg[:seg.index("call_ui.html")]
+    ck("eligibility is checked only for the ongoing step",
+       seg.index('mode == "ongoing"') < seg.index("_chat_eligible"))
+
+    # Asking for ongoing without having done the call must NOT silently pass:
+    # the call is what seeds memory.
+    ck("ongoing without the call falls back to the call",
+       "onboarding call not done" in bot)
+
+    # And the web app's own router must still send the two distinct URLs.
+    route = (pathlib.Path(chat_engine.__file__).parents[1]
+             / "src" / "web" / "static" / "js" / "route.js")
+    if route.exists():
+        r = route.read_text(encoding="utf-8")
+        ck("web app sends a bare uid for the onboarding call",
+           'if (!callDone) return AGENT_URL + "?uid=" + u' in r)
+        ck("and mode=ongoing only once the call is done",
+           '"&mode=ongoing"' in r)
+
+
 def test_avatar_url_is_content_versioned():
     """Replacing the image changed nothing for anyone who had loaded the page.
 
@@ -1706,6 +1750,7 @@ def main():
                test_conversation_falls_back_like_the_small_jobs_do,
                test_close_session_calls_match_their_signatures,
                test_chat_survives_a_restart,
+               test_landing_route_respects_the_requested_step,
                test_avatar_url_is_content_versioned,
                test_chat_ui_has_a_working_logout,
                test_chat_ui_queues_instead_of_dropping,

@@ -1744,11 +1744,28 @@ async def call_ui(request: Request):
     if not uid:
         return RedirectResponse(WEB_APP_URL)
 
-    if request.query_params.get("screen") != "call":
+    # RESPECT THE MODE THE WEB APP ASKED FOR.
+    #
+    # Its router already decides which step the user is on and encodes it:
+    #   ?uid=...              -> step 2, the ONBOARDING CALL
+    #   ?uid=...&mode=ongoing -> step 3, the ongoing product
+    #
+    # This route used to ignore `mode` and send anyone with
+    # onboarding_call_done=TRUE straight to chat -- including when the web app
+    # had explicitly asked for the onboarding call. That threw away the one
+    # signal that knows which step the user is actually on, and a user sent to
+    # redo onboarding landed in chat instead.
+    mode = (request.query_params.get("mode") or "").strip().lower()
+    wants_call = request.query_params.get("screen") == "call"
+
+    if mode == "ongoing" and not wants_call:
         ok, _profile, _memory = _chat_eligible(uid)
         if ok:
-            qs = f"?uid={quote(uid)}"
-            return RedirectResponse(f"/chat{qs}")
+            return RedirectResponse(f"/chat?uid={quote(uid)}")
+        # Asked for ongoing but the call is not done: the onboarding call is
+        # the only thing that seeds memory, so it has to come first.
+        _log(f"ongoing requested but onboarding call not done uid={uid[:8]} "
+             f"-- serving the call")
 
     html = (_HERE / "call_ui.html").read_text(encoding="utf-8")
     return HTMLResponse(html.replace("{{AVATAR_V}}", _avatar_version()))
