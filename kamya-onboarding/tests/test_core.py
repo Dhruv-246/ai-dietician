@@ -786,6 +786,17 @@ def test_medical_boundary_is_doctor_owned_not_everyday():
 
     ck("MEDICAL is defined as what a DOCTOR owns", "things a DOCTOR owns" in src)
     ck("everyday complaints are named as NOT medical", "NOT MEDICAL" in src)
+
+    # RELAYING a doctor's instruction is not ASKING for medical judgement.
+    # Live: "mujhe doctor ne ORS peene ko bola h" -> "aapke doctor sabse sahi
+    # guide karenge", which tells someone who just quoted their doctor to go
+    # ask their doctor.
+    ck("relaying the doctor's own words is not medical",
+       "ALSO NOT MEDICAL" in src and "already told them" in src)
+    ck("the real failing message is named", "doctor ne ORS peene ko bola" in src)
+    ck("the trigger's purpose is stated, not just its cases",
+       "not for\n                 every sentence containing the word doctor" in src
+       or "every sentence containing the word doctor" in src)
     for everyday in ("poor sleep", "low energy", "bloating", "cravings"):
         ck(f"named as a dietician's own work: {everyday}", everyday in src)
     ck("the failing sentence is quoted as the example",
