@@ -219,6 +219,74 @@ def test_rag_gate():
 
 
 # --------------------------------------------------------------- onboarding --
+def test_health_basics_moved_from_the_form_to_the_call():
+    """Diet, allergies and conditions were tick-box screens people skipped.
+
+    Asked aloud they get real answers, with context a checkbox cannot carry.
+    The risk in moving them is the opposite failure -- being skipped by
+    accident -- so the node requires ALL THREE before it advances.
+    """
+    import memory_facts as mf
+
+    # It sits between rapport and the problem: asking about medication in the
+    # first thirty seconds is cold, and DAILY_EATING needs diet before it
+    # starts asking about meals.
+    order, n = [], "GREETING"
+    while n:
+        order.append(n)
+        n = on.NODES[n].get("next")
+    ck("the node is in the flow", "HEALTH_BASICS" in order)
+    ck("it comes after rapport",
+       order.index("HEALTH_BASICS") > order.index("RAPPORT"))
+    ck("and before any food talk",
+       order.index("HEALTH_BASICS") < order.index("DAILY_EATING"))
+
+    g = on.NODE_GOALS["HEALTH_BASICS"]
+    ck("it wants exactly the three moved fields",
+       set(g["paths"]) == {"diet.type", "health.allergies", "health.conditions"})
+    ck("every path is a real schema path",
+       all(p in mf.SCHEMA for p in g["paths"]))
+    # ALL three. Each changes advice on its own: diet decides every
+    # suggestion, an allergy makes one unsafe, a condition decides whether
+    # Mira should be advising at all.
+    ck("none of the three may be skipped", g["min_paths"] == 3)
+    ck("two out of three is not enough",
+       on.node_is_covered("HEALTH_BASICS",
+                          {"diet.type": "veg", "health.allergies": "none"}) is False)
+    ck("all three completes it",
+       on.node_is_covered("HEALTH_BASICS",
+                          {"diet.type": "veg", "health.allergies": "none",
+                           "health.conditions": "thyroid"}) is True)
+
+    prompt = on.NODES["HEALTH_BASICS"]["prompt"]
+    ck("it asks one at a time", "ONE at a time" in prompt)
+    ck('"no allergies" is accepted as a real answer',
+       "COMPLETE answer" in prompt)
+    # Match on fragments that cannot straddle a line wrap, and mind the case --
+    # both of these failed first time on a prompt that was already correct.
+    ck("it does not read a list of diseases at them",
+       "do not read a list of" in prompt)
+    ck("a mentioned condition still defers to the doctor",
+       "doctor guides that part" in prompt)
+    ck("and she still may not advise on it",
+       "Do NOT advise" in prompt and "do NOT interpret" in prompt)
+
+    # THE SILENT BREAKAGE: {{diet_type}} used to read the profile, which is
+    # now empty for every new user. DAILY_EATING would have confidently
+    # claimed to know a diet it did not.
+    ck("diet comes from the call when the form no longer has it",
+       "vegetarian" in on.build_node_prompt("DAILY_EATING", {}, {"diet.type": "vegetarian"}))
+    ck("the old form still works for users onboarded under it",
+       "eggetarian" in on.build_node_prompt("DAILY_EATING", {"diet": "eggetarian"}, {}))
+    ck("the call's answer wins over a stale profile value",
+       "vegan" in on.build_node_prompt("DAILY_EATING", {"diet": "eggetarian"},
+                                       {"diet.type": "vegan"}))
+    ck("and unknown is stated honestly rather than assumed",
+       "unknown" in on.build_node_prompt("DAILY_EATING", {}, {}))
+    ck("DAILY_EATING is told what to do when it is unknown",
+       "ask once" in on.NODES["DAILY_EATING"]["prompt"])
+
+
 def test_onboarding():
     bad = [p for g in on.NODE_GOALS.values() for p in g["paths"]
            if p not in mf.SCHEMA]
@@ -1617,7 +1685,9 @@ def test_bedrock_falls_back():
 
 def main():
     for fn in (test_llm_client, test_extraction, test_stages, test_memory,
-               test_rag_gate, test_onboarding, test_echo_guard,
+               test_rag_gate, test_onboarding,
+               test_health_basics_moved_from_the_form_to_the_call,
+               test_echo_guard,
                test_chat_session_lifecycle, test_chat_session_store,
                test_chat_bubbles_and_budgets, test_chat_fact_merge,
                test_chat_has_a_semantic_safety_backstop,

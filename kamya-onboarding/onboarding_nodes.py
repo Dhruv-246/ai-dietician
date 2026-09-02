@@ -279,6 +279,59 @@ USER PROFILE:
 {{profile}}""",
         "min_turns": 2,
         "max_turns": 4,
+        "next": "HEALTH_BASICS",
+    },
+
+    # ── Node 3: HEALTH BASICS ────────────────────────────────────────────────
+    # Moved OUT of the manual form on 2026-09-02. Diet, allergies and medical
+    # conditions used to be three tick-box screens at signup; people click
+    # through those. Asked aloud they get real answers, and a condition
+    # mentioned in conversation carries context a checkbox never does
+    # ("thyroid hai, medicine chal rahi hai two years se").
+    #
+    # Placed AFTER rapport and BEFORE the problem: asking about medication in
+    # the first thirty seconds is cold, and DAILY_EATING later needs to know
+    # whether they eat meat before it starts asking about meals.
+    "HEALTH_BASICS": {
+        "prompt": """\
+You are Mira, continuing the onboarding call with {{name}}.
+
+YOUR JOB RIGHT NOW: Three basics you genuinely need before talking about food.
+Ask them ONE at a time, conversationally. This should feel like a friend
+checking, not a form being filled.
+
+COVER ALL THREE. Do not skip one because they seem healthy or seem in a hurry:
+1. DIET — veg, non-veg, egg, vegan, Jain? Everything you suggest later depends
+   on this, so never guess it.
+2. ALLERGIES — any food that does not suit them, or that they avoid because of
+   a reaction. "Koi allergy nahi" is a COMPLETE answer; take it and move on.
+3. HEALTH CONDITIONS — anything ongoing: thyroid, diabetes, BP, PCOS, acidity,
+   or any medicine they take regularly. Ask openly, do not read a list of
+   diseases at them.
+
+START WITH:
+"{{name}}, khaane ki baat karne se pehle do-teen basic cheezein — aap veg hain
+ya non-veg?"
+
+HOW TO ASK THE HEALTH ONE
+Lead into it gently, as the reason you are asking:
+  "Aur koi health condition — thyroid, sugar, BP, kuch bhi jo chal raha ho?
+   Ya koi medicine regular leti hain?"
+Never sound like you are screening them. If they say no to everything, that is
+a fine answer and you move on warmly.
+
+IF THEY MENTION A CONDITION OR MEDICINE
+Acknowledge it, note it, and say their doctor guides that part. Ask ONE natural
+follow-up if it affects food (how long, any foods the doctor asked them to
+avoid). Do NOT advise, do NOT interpret, do NOT suggest anything.
+
+DO NOT
+- Do not ask all three in one breath. One question, then wait.
+- Do not skip allergies because they mentioned a condition, or the reverse.
+- Do not re-ask what is already in the USER PROFILE above.
+""",
+        "min_turns": 2,
+        "max_turns": 6,
         "next": "PROBLEM",
     },
 
@@ -336,7 +389,10 @@ You are Mira, continuing the onboarding call with {{name}}.
 
 YOUR JOB RIGHT NOW: Walk through a real day of eating. Meal by meal, one at a time. React between each answer.
 
-You know they are {{diet_type}}. Use this — don't ask "veg ya non-veg?"
+Their diet: {{diet_type}}. If that says anything other than "unknown", you
+already know it — never ask "veg ya non-veg?" again. If it literally says
+unknown, HEALTH_BASICS failed to capture it, so ask once, briefly, before
+suggesting anything.
 
 START WITH:
 "अच्छा, अब daily food के बारे में बताइए — सुबह उठके सबसे पहले क्या खाते हैं?"
@@ -537,6 +593,15 @@ NODE_GOALS = {
     "RAPPORT": {
         "goal": "Get a feel for their day and routine — nothing clinical yet.",
         "paths": ["lifestyle.schedule"],
+    },
+    "HEALTH_BASICS": {
+        "goal": ("Know what they eat, what they cannot eat, and what they are "
+                 "being treated for — before any food talk begins."),
+        # All three, because each one changes advice on its own: diet decides
+        # every suggestion, an allergy makes one unsafe, and a condition
+        # decides whether Mira should be advising at all.
+        "paths": ["diet.type", "health.allergies", "health.conditions"],
+        "min_paths": 3,
     },
     "PROBLEM": {
         "goal": "Understand what they actually want to change and why NOW, "
@@ -866,7 +931,14 @@ def build_node_prompt(node_name: str, profile: dict, extracted: dict,
     # Inject profile fields.
     name = str(profile.get("name", "")).strip() or "there"
     prompt = prompt.replace("{{name}}", name)
-    prompt = prompt.replace("{{diet_type}}", str(profile.get("diet", "")).strip() or "unknown")
+    # Diet used to come from the manual form. It is now asked in HEALTH_BASICS,
+    # so prefer what the CALL learned and fall back to the profile only for
+    # users who onboarded under the old form. Reading the profile alone would
+    # have made every new user "unknown" here, and DAILY_EATING would then
+    # confidently tell the model it knows something it does not.
+    _diet = (str((extracted or {}).get("diet.type", "")).strip()
+             or str(profile.get("diet", "")).strip())
+    prompt = prompt.replace("{{diet_type}}", _diet or "unknown")
     prompt = prompt.replace("{{goal_from_profile}}", str(profile.get("conditions", "")).strip() or "health improvement")
 
     # Build profile block.

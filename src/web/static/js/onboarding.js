@@ -1,9 +1,15 @@
-/* Onboarding wizard (6 screens).
+/* Onboarding wizard (3 screens): name, age+gender, height+weight.
+ *
+ * Diet, allergies and health conditions used to be screens 4-6 here. They
+ * moved to the onboarding CALL on 2026-09-02 -- as tick-box screens people
+ * clicked straight through, and asked aloud they give real answers with
+ * context a checkbox cannot carry ("thyroid hai, do saal se medicine chal
+ * rahi hai"). See HEALTH_BASICS in kamya-onboarding/onboarding_nodes.py.
  *
  * - Only authenticated users reach it (auth guard below).
  * - If onboarding_completed === TRUE -> go straight to chat.
  * - Each screen saves immediately to Google Sheets via POST /api/user/profile.
- * - Final screen sets onboarding_completed = TRUE, then goes to chat.
+ * - Final screen sets onboarding_completed = TRUE, then starts the call.
  */
 import { getFirebaseAuth } from "./firebase.js";
 import { onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
@@ -15,7 +21,7 @@ const stepEl = () => $("ob-step");
 const state = {
   name: "", age: "", sex: "",
   height_cm: null, weight_kg: null, unit_pref: "ft_kg",
-  diet: "", allergies: [], conditions: [],
+  // diet / allergies / conditions are collected on the CALL now, not here.
 };
 
 let currentUser = null;
@@ -217,7 +223,11 @@ function screenHeightWeight() {
     }
     const unit_pref = `${heightMode}_${weightUnit}`;
     try { localStorage.setItem("mira_unit_pref", unit_pref); } catch (_) {}
-    commit({ height_cm, weight_kg, unit_pref }).then((ok) => {
+    // finish: true -- this is now the LAST manual screen. Diet, allergies and
+    // conditions moved to the onboarding CALL on 2026-09-02: they were three
+    // tick-box screens people clicked through, and asked aloud they get real
+    // answers with context a checkbox cannot carry.
+    commit({ height_cm, weight_kg, unit_pref }, { finish: true }).then((ok) => {
       if (ok) { state.height_cm = height_cm; state.weight_kg = weight_kg; state.unit_pref = unit_pref; }
     });
   }
@@ -225,138 +235,10 @@ function screenHeightWeight() {
   render3();
 }
 
-/* ---------- Screen 4: Diet ---------- */
-function screenDiet() {
-  const cards = [
-    ["vegetarian", "Vegetarian", "no meat, no egg"],
-    ["vegan", "Vegan", "no dairy"],
-    ["eggetarian", "Eggetarian", "veg + egg"],
-    ["non-veg", "Non-veg", "everything"],
-    ["jain", "Jain", "no onion, garlic, root veg"],
-  ];
-  setStep(`
-    <h2 class="ob-q">How do you eat?</h2>
-    <div class="ob-cards">
-      ${cards.map(([v, t, c]) => `
-        <button class="ob-card ${state.diet === v ? "sel" : ""}" data-val="${v}">
-          <span class="ob-card-t">${t}</span>
-          <span class="ob-card-c">${c}</span>
-        </button>`).join("")}
-    </div>
-    <p id="ob-err" class="ob-err hidden"></p>
-  `);
-  stepEl().querySelectorAll(".ob-card").forEach((b) => {
-    b.onclick = () => {
-      state.diet = b.dataset.val;
-      stepEl().querySelectorAll(".ob-card").forEach((x) =>
-        x.classList.toggle("sel", x === b));
-      commit({ diet: b.dataset.val });  // tap = select + auto-advance
-    };
-  });
-}
-
-/* ---------- Screens 5 & 6: multi-select + None + free text ---------- */
-function multiSelectScreen({ title, field, options, freePlaceholder, footer, extraChip, finish }) {
-  const selected = new Set(state[field] || []);
-  let noneSel = Array.isArray(state[field]) && state[field].length === 0 && state[`_${field}_none`];
-
-  const chips = [...options];
-  if (extraChip) chips.push(extraChip);
-
-  setStep(`
-    <h2 class="ob-q">${title}</h2>
-    <div class="ob-chips ob-grid" id="ms-chips">
-      ${chips.map((o) => `<button class="ob-chip" data-val="${esc(o)}">${esc(o)}</button>`).join("")}
-    </div>
-    <button id="ms-none" class="ob-none">None</button>
-    <input id="ms-free" class="ob-freetext" type="text" placeholder="${esc(freePlaceholder)}" />
-    <div class="ob-chips ob-grid" id="ms-typed"></div>
-    ${footer ? `<p class="ob-footer">${footer}</p>` : ""}
-    <p id="ob-err" class="ob-err hidden"></p>
-    <button id="ob-next" class="ob-btn">Next</button>
-  `);
-
-  const chipsWrap = $("ms-chips");
-  const noneBtn = $("ms-none");
-  const freeEl = $("ms-free");
-  const typedWrap = $("ms-typed");
-
-  function renderTyped() {
-    const items = typedItems();
-    typedWrap.innerHTML = items
-      .map((t) => `<span class="ob-chip typed">${esc(t)}</span>`).join("");
-  }
-  function typedItems() {
-    return freeEl.value.split(",").map((s) => s.trim()).filter(Boolean);
-  }
-  function syncNone() { noneBtn.classList.toggle("sel", noneSel); }
-
-  chipsWrap.querySelectorAll(".ob-chip").forEach((b) => {
-    if (selected.has(b.dataset.val)) b.classList.add("sel");
-    b.onclick = () => {
-      noneSel = false; syncNone();           // picking a chip clears None
-      if (selected.has(b.dataset.val)) { selected.delete(b.dataset.val); b.classList.remove("sel"); }
-      else { selected.add(b.dataset.val); b.classList.add("sel"); }
-    };
-  });
-  noneBtn.onclick = () => {
-    noneSel = true; syncNone();
-    selected.clear();                          // None clears all chips
-    chipsWrap.querySelectorAll(".ob-chip").forEach((x) => x.classList.remove("sel"));
-  };
-  freeEl.addEventListener("input", () => {
-    if (typedItems().length) { noneSel = false; syncNone(); }
-    renderTyped();
-  });
-
-  $("ob-next").onclick = () => {
-    const typed = typedItems();
-    // On the final screen, mark onboarding complete in the same save.
-    const finishFields = finish ? { onboarding_completed: "TRUE" } : {};
-    if (noneSel) {
-      commit({ [field]: [], ...finishFields }, { finish }).then((ok) => {
-        if (ok) { state[field] = []; state[`_${field}_none`] = true; }
-      });
-      return;
-    }
-    const combined = [...new Set([...selected, ...typed].map((s) => s.toLowerCase()))];
-    if (combined.length === 0) {
-      showErr("Please pick at least one, choose None, or type something.");
-      return;
-    }
-    commit({ [field]: combined, ...finishFields }, { finish }).then((ok) => {
-      if (ok) { state[field] = combined; state[`_${field}_none`] = false; }
-    });
-  };
-}
-
-function screenAllergies() {
-  multiSelectScreen({
-    title: "Any food allergies?",
-    field: "allergies",
-    options: ["peanut", "tree nuts", "dairy", "gluten", "soy", "egg", "shellfish"],
-    freePlaceholder: "Anything else? e.g. brinjal, sesame",
-    finish: false,
-  });
-}
-
-function screenConditions() {
-  const extra = state.sex === "female" ? "pregnant / breastfeeding" : null;
-  multiSelectScreen({
-    title: "Any health conditions?",
-    field: "conditions",
-    options: ["diabetes", "PCOS/PCOD", "thyroid", "high BP", "cholesterol", "IBS/acidity", "kidney issue"],
-    freePlaceholder: "Anything else? e.g. migraine, fatty liver",
-    extraChip: extra,
-    footer: "This stays private and helps Mira keep advice safe for you.",
-    finish: true,   // last screen -> completes onboarding
-  });
-}
-
 /* ---------- router ---------- */
+// name, age, gender, height, weight. Everything else is asked on the call.
 const SCREENS = [
   screenName, screenAgeSex, screenHeightWeight,
-  screenDiet, screenAllergies, screenConditions,
 ];
 
 function render() {
