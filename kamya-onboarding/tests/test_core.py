@@ -1153,9 +1153,15 @@ def test_chat_ui_has_a_working_logout():
     ck("the burger is a real button now", 'id="menuBtn"' in ui
        and 'class="menu" aria-hidden' not in ui)
     ck("there is a log out item", 'id="logoutBtn"' in ui and "Log out" in ui)
-    ck("the login URL is injected, not hardcoded twice", "{{LOGIN_URL}}" in ui)
+    ck("the logout URL is injected, not hardcoded twice", "{{LOGOUT_URL}}" in ui)
     ck("logging out replaces history rather than pushing",
-       "location.replace(LOGIN_URL)" in ui)   # back button must not return
+       "location.replace(LOGOUT_URL)" in ui)  # back button must not return
+    # Must be the SIGN-OUT page, not /login. Firebase persists the session in
+    # the browser, so /login saw a still-authenticated user and forwarded them
+    # to onboarding or chat without ever asking for a password -- logout
+    # appeared to do nothing.
+    ck("it targets sign-out, not the login form",
+       "LOGOUT_URL" in ui and "location.replace(LOGIN_URL)" not in ui)
     ck("session storage is cleared on the way out", "sessionStorage.clear()" in ui)
     ck("a click anywhere closes the menu", 'id="scrim"' in ui)
     ck("escape closes it too", "e.key === 'Escape'" in ui)
@@ -1163,10 +1169,12 @@ def test_chat_ui_has_a_working_logout():
 
     import pathlib as _p
     bot = _p.Path(chat_engine.__file__).with_name('bot.py').read_text(encoding='utf-8')
-    ck('LOGIN_URL derives from WEB_APP_URL -- one source of truth',
-       'WEB_APP_URL.rstrip("/") + "/login"' in bot)
+    ck('the logout URL derives from WEB_APP_URL -- one source of truth',
+       'WEB_APP_URL.rstrip("/") + "/logout"' in bot)
+    ck('and it is the sign-out route, never the login form',
+       '"/login"' not in bot.split("LOGOUT_URL")[1][:200])
     ck('and the placeholder is substituted when serving the page',
-       'html.replace("{{LOGIN_URL}}", LOGIN_URL)' in bot)
+       'html.replace("{{LOGOUT_URL}}", LOGOUT_URL)' in bot)
 
 
 def test_chat_ui_queues_instead_of_dropping():

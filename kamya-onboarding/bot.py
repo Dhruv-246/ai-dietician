@@ -1874,15 +1874,23 @@ def _chat_eligible(uid: str):
     return bool(memory.get("onboarding_call_done")), profile, memory
 
 
-# Where "Log out" goes. Derived from WEB_APP_URL so there is one source of
-# truth -- the chat page must not hardcode a second copy that drifts.
-LOGIN_URL = os.getenv("LOGIN_URL", WEB_APP_URL.rstrip("/") + "/login")
+# Where "Log out" goes: the web app's OWN sign-out page, not /login.
+#
+# Pointing at /login was a bug. Firebase persists the session in the browser,
+# so /login saw a still-authenticated user and immediately forwarded them --
+# to onboarding or to chat depending on their flag -- without ever asking for
+# a password. It looked like logout did nothing.
+#
+# /logout is the web app's sign-out flow ("Signing out — Mira"). Sign-out
+# belongs to whoever owns the auth session; the chat page has no business
+# reaching into Firebase's storage to fake it.
+LOGOUT_URL = os.getenv("LOGOUT_URL", WEB_APP_URL.rstrip("/") + "/logout")
 
 
 @app.get("/chat", response_class=HTMLResponse)
 async def chat_page():
     html = Path(__file__).with_name("chat_ui.html").read_text(encoding="utf-8")
-    return HTMLResponse(html.replace("{{LOGIN_URL}}", LOGIN_URL))
+    return HTMLResponse(html.replace("{{LOGOUT_URL}}", LOGOUT_URL))
 
 
 @app.get("/chat/history")

@@ -142,7 +142,7 @@
 </footer>
 
 <script>
-const LOGIN_URL = "{{LOGIN_URL}}";
+const LOGOUT_URL = "{{LOGOUT_URL}}";   // substituted server-side
 const qs = new URLSearchParams(location.search);
 const UID = qs.get('uid') || '';
 const thread = document.getElementById('thread');
@@ -209,10 +209,11 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !sheet.hidden){ menu(false); menuBtn.focus(); }
 });
 document.getElementById('logoutBtn').addEventListener('click', () => {
-  // Leave the uid behind. Nothing sensitive is cached client-side, but the
-  // next person on this device must not land in someone else's thread.
+  // Go to the web app's SIGN-OUT page, not /login. Firebase keeps the session
+  // in the browser, so /login saw a still-authenticated user and forwarded
+  // them straight back in without asking for a password.
   try { sessionStorage.clear(); } catch (e) {}
-  location.replace(LOGIN_URL);
+  location.replace(LOGOUT_URL);
 });
 
 inp.addEventListener('input', () => {
