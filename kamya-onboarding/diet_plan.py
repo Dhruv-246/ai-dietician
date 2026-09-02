@@ -324,6 +324,13 @@ WRITING
   English, with Indian food names in roman script (dal, roti, sabzi, poha).
   NEVER use Devanagari -- the PDF font cannot render it and it becomes boxes.
   Notes are one short line, ending with an approximate calorie total.
+
+NO NAMES, NO PERSONAL DETAILS
+  This becomes a PDF that gets forwarded, printed and left on a kitchen
+  counter. Address the reader as "you" and never write their name, age,
+  weight, height or gender anywhere -- not in the summary, not in a note.
+  Write "Your dinners are lighter this week", never "Ananya works night
+  shifts, so".
 """
 
 
@@ -369,6 +376,63 @@ _EDIT_LEAK = re.compile(
     r"^\s*(replaced|swapped|substituted|changed|switched)\b[^.;]*[.;]\s*|"
     r"\s*\(?\b(instead of|in place of|rather than)\b[^.;)]*\)?",
     re.I)
+
+
+def _depersonalise(text: str, name: str) -> str:
+    """Take the reader's name back out of their own plan.
+
+    The prompt asks for second person, but the summary is free prose and the
+    model reaches for a name when it has one. This is a document people
+    forward and print, so the rule is enforced rather than requested.
+    """
+    out = str(text or "")
+    parts = [p for p in re.split(r"\s+", str(name or "").strip()) if len(p) > 2]
+    if not parts:
+        return out.strip()
+
+    # "Ananya works nights and has a late breakfast" -> "you works ... and
+    # has ...", so both verbs need correcting, not just the one after "you".
+    third = {"works": "work", "has": "have", "is": "are", "does": "do",
+             "eats": "eat", "wants": "want", "needs": "need",
+             "prefers": "prefer", "likes": "like", "avoids": "avoid",
+             "skips": "skip", "follows": "follow", "tends": "tend",
+             "struggles": "struggle", "goes": "go", "gets": "get",
+             "was": "were", "starts": "start", "keeps": "keep"}
+    verbs = "|".join(third)
+
+    fixed = []
+    for sentence in re.split(r"(?<=[.!?])\s+", out):
+        replaced = False
+        for part in parts:
+            sentence = re.sub(rf"\b{re.escape(part)}'s\b", "your", sentence,
+                              flags=re.I)
+            sentence, n = re.subn(rf"\b{re.escape(part)}\b", "you", sentence,
+                                  flags=re.I)
+            replaced = replaced or bool(n)
+        # Only where a NAME became "you", and only within that clause.
+        #
+        # Correcting the whole sentence turned "Your plan avoids wheat" into
+        # "Your plan avoid wheat", and "you eat late, so dinner is lighter"
+        # into "...dinner are lighter" -- past the comma the subject is no
+        # longer the reader. A clause boundary is where the correction stops.
+        if replaced:
+            m = re.search(r"\byou\b", sentence, re.I)
+            head_end = len(sentence)
+            punct = re.search(r"[,;:]", sentence[m.end():]) if m else None
+            if punct:
+                head_end = m.end() + punct.start()
+            head, tail = sentence[:head_end], sentence[head_end:]
+            head = re.sub(rf"\b({verbs})\b",
+                          lambda mm: third[mm.group(1).lower()],
+                          head, flags=re.I)
+            sentence = head + tail
+        fixed.append(sentence)
+
+    out = re.sub(r"\s{2,}", " ", " ".join(fixed)).strip()
+    # A name at the start of a sentence becomes a lower-case "you".
+    out = re.sub(r"(^|(?<=[.!?])\s+)([a-z])",
+                 lambda m: m.group(1) + m.group(2).upper(), out)
+    return out
 
 
 def _clean_note(note: str) -> str:
@@ -522,15 +586,16 @@ async def generate(profile: dict, memory: dict, *, start: str = "",
             for day in data["days"]:
                 for meal in day.get("meals") or []:
                     meal["note"] = _clean_note(meal.get("note"))
+            # No identity is stored on the plan. It used to carry name, age,
+            # gender, height and weight so the PDF could print a details
+            # card; the PDF no longer shows any of that, so there is nothing
+            # to keep it for. `diet` and `allergies` stay -- amend and the
+            # validator need them, and neither identifies anyone.
             data["week_start"] = start
             data["generated_for"] = {"diet": diet, "allergies": allergies}
-            data["basics"] = {
-                "name": profile.get("name", ""), "age": profile.get("age", ""),
-                "gender": profile.get("gender", ""),
-                "height": profile.get("height", ""),
-                "weight": profile.get("weight", ""),
-            }
             data["diet"] = diet
+            data["summary"] = _depersonalise(data.get("summary"),
+                                             profile.get("name"))
             log(f"plan ready for week {start} (attempt {attempt})")
             return data
 

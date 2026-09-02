@@ -2224,6 +2224,16 @@ async def _plan_after_onboarding(uid: str):
         if not ok:
             _log(f"plan after onboarding: uid={uid[:8]} not eligible yet")
             return
+        # Greet FIRST -- before extraction, before generation. Both are model
+        # calls taking tens of seconds, and the user has just hung up and
+        # landed in an empty chat. Being greeted and told the plan is coming
+        # is the whole point; saying it after the work is a silent minute.
+        first = str(profile.get("name") or "").strip().split(" ")[0]
+        hello = f"Hey {first}! Aap kaise ho? " if first else "Hey! Aap kaise ho? "
+        await _plan_announce(
+            uid, profile, memory,
+            hello + "Aapka diet plan tayyar kar rahi hoon, abhi bhejti hoon 😊")
+
         # Everything they told us on the call about food and timing, banked
         # as preferences before the first plan is built. They are already in
         # long-term memory, but only as context the prompt might honour --
@@ -2243,11 +2253,14 @@ async def _plan_after_onboarding(uid: str):
 
         existing = await diet_plan.load(uid, log=_log)
         if existing and existing.get("week_start") == diet_plan.week_start():
+            # Already built -- send it straight after the greeting.
+            await _plan_announce(
+                uid, profile, memory,
+                "Yeh raha aapka is hafte ka diet plan 👇 " + PLAN_CARD)
             return
         await _ensure_plan(
             uid, profile, memory,
-            announce=("Aur haan -- aapka is hafte ka diet plan bhi taiyaar "
-                      "hai. " + PLAN_CARD))
+            announce="Yeh raha aapka is hafte ka diet plan 👇 " + PLAN_CARD)
         _log(f"plan after onboarding ready uid={uid[:8]}")
     except Exception as exc:
         _log(f"plan after onboarding failed uid={uid[:8]}: "
@@ -2324,9 +2337,10 @@ async def plan_pdf_download(uid: str = ""):
         _log(f"plan render failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
         return JSONResponse({"error": "PDF banane mein problem hui."},
                             status_code=500)
-    name = re.sub(r"[^A-Za-z0-9]+", "-",
-                  str((plan.get("basics") or {}).get("name") or "mira")).strip("-")
-    fname = f"{name or 'mira'}-diet-plan-{plan.get('week_start','')}.pdf"
+    # Generic on purpose. The filename is the most visible part of a shared
+    # document -- it shows in the download bar, the file manager and any chat
+    # it is forwarded to -- and it used to be the user's full name.
+    fname = f"diet-plan-{plan.get('week_start', '') or 'week'}.pdf"
     _log(f"plan.pdf served uid={uid[:8]} week={plan.get('week_start')} "
          f"generated={made} bytes={len(data)}")
     headers = {"Content-Disposition": f'attachment; filename="{fname}"',

@@ -1967,6 +1967,75 @@ def test_plan_card_in_chat():
        and "put zucchini in Monday LUNCH" in prompt)
 
 
+def test_plan_pdf_carries_no_identity():
+    """A diet plan gets forwarded, printed and left on a kitchen counter.
+
+    It used to carry the reader's name on the cover, a card with their name,
+    age, gender, height and weight, their name in the filename, and a summary
+    written in the third person about them.
+    """
+    src = open(os.path.join(os.path.dirname(__file__), "..", "plan_pdf.py"),
+               encoding="utf-8").read()
+    ck("the cover no longer names the reader", "Prepared for" not in src)
+    # Checked against the CODE, not the file: the docstring explaining the
+    # removal legitimately names what was removed.
+    ck("the details card is gone", "def _basics_card" not in src
+       and 'Paragraph("BASIC DETAILS"' not in src
+       and '"Name", "Height", "Weight", "Gender", "Age"' not in src)
+    ck("it says which week instead", "_week_card" in src and "YOUR WEEK" in src)
+
+    bot = open(os.path.join(os.path.dirname(__file__), "..", "bot.py"),
+               encoding="utf-8").read()
+    ck("the filename is generic",
+       'fname = f"diet-plan-{plan.get(' in bot)
+
+    flat = " ".join(dpl._SYSTEM.split())
+    ck("the model is told to address the reader as you",
+       "NO NAMES, NO PERSONAL DETAILS" in flat and 'as "you"' in flat)
+
+    d = dpl._depersonalise
+    ck("a name in the summary becomes second person",
+       d("Ananya works night shift and has a late breakfast habit.",
+         "Ananya Sharma")
+       == "You work night shift and have a late breakfast habit.")
+    ck("a possessive becomes yours",
+       d("Rahul's dinners are lighter this week.", "Rahul Verma")
+       == "Your dinners are lighter this week.")
+    # Correcting the whole sentence broke the clause after the comma, where
+    # the subject is no longer the reader.
+    ck("only the reader's own clause is corrected",
+       d("Meals are simple. Dhruv eats late, so dinner is lighter.", "Dhruv")
+       == "Meals are simple. You eat late, so dinner is lighter.")
+    ck("a sentence about the plan is left alone",
+       d("Your plan avoids wheat.", "Dhruv") == "Your plan avoids wheat.")
+    ck("text without the name is untouched",
+       d("This week keeps dinners light.", "Dhruv Raghav")
+       == "This week keeps dinners light.")
+    ck("a missing name is harmless",
+       d("This week keeps dinners light.", "") == "This week keeps dinners light.")
+
+
+def test_greeting_when_the_call_ends():
+    """The user hangs up and lands in an empty chat. Greet, say the plan is
+    coming, then send it -- rather than a silent minute while two model calls
+    run."""
+    bot = open(os.path.join(os.path.dirname(__file__), "..", "bot.py"),
+               encoding="utf-8").read()
+    fn = bot[bot.index("async def _plan_after_onboarding"):
+             bot.index("async def _plan_announce")]
+    ck("she greets them by first name", 'Aap kaise ho?' in fn
+       and 'profile.get("name")' in fn)
+    ck("she says the plan is on its way",
+       "abhi bhejti hoon" in fn)
+    ck("the greeting goes out BEFORE extraction and generation",
+       fn.index("abhi bhejti hoon") < fn.index("extract_preferences")
+       < fn.index("_ensure_plan"))
+    ck("the plan follows as a card",
+       fn.count("PLAN_CARD") >= 2)
+    ck("no name is needed for the greeting to work",
+       'else "Hey! Aap kaise ho? "' in fn)
+
+
 def test_plan_pdf_renders():
     """The PDF must build from a plan dict with no network and no fonts
     beyond the built-ins."""
@@ -2255,6 +2324,8 @@ def main():
                test_preference_extraction_and_compliance_prompts,
                test_preference_verdicts_are_not_fatal, test_plan_change_prefilter,
                test_plan_pdf_renders, test_plan_trigger_contract,
+               test_plan_pdf_carries_no_identity,
+               test_greeting_when_the_call_ends,
                test_plan_change_prompt_boundaries,
                test_plan_preference_rendering, test_plan_card_in_chat,
                test_prompt_invariants,

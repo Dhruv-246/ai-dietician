@@ -33,7 +33,7 @@ from reportlab.platypus import (BaseDocTemplate, Frame, NextPageTemplate,
 
 DARK = colors.HexColor("#14532D")     # deep green, the cover and day headers
 GOLD = colors.HexColor("#F2C14E")     # the cover title
-LEAF = colors.HexColor("#B7CE8F")     # the basics card
+LEAF = colors.HexColor("#B7CE8F")     # the week card
 CREAM = colors.HexColor("#FAF8EC")    # day-table body
 INK = colors.HexColor("#1B2A21")
 MUTED = colors.HexColor("#5C7268")
@@ -135,15 +135,27 @@ def _plain_bg(canvas, doc):
     canvas.restoreState()
 
 
-def _basics_card(plan, st):
-    b = plan.get("basics") or {}
-    rows = [[Paragraph("BASIC DETAILS", ParagraphStyle(
+def _week_card(plan, st):
+    """The header for the summary page.
+
+    This was a BASIC DETAILS card carrying name, height, weight, gender and
+    age. A diet plan gets forwarded, printed and left on a kitchen counter,
+    and none of that needs the reader's identity on it. The document now says
+    which week it covers and nothing about who it is for.
+    """
+    week = _pretty(plan.get("week_start", ""))
+    rows = [[Paragraph("YOUR WEEK", ParagraphStyle(
         "bd", fontName="Helvetica-Bold", fontSize=13, textColor=DARK,
         alignment=TA_CENTER)), ""]]
-    for label in ("Name", "Height", "Weight", "Gender", "Age"):
-        val = _ascii(b.get(label.lower(), ""))
-        if val:
-            rows.append([Paragraph(label, st["kv"]), Paragraph(val, st["kvv"])])
+    if week:
+        rows.append([Paragraph("Week of", st["kv"]),
+                     Paragraph(week, st["kvv"])])
+    rows.append([Paragraph("Days", st["kv"]),
+                 Paragraph(str(len(plan.get("days") or [])), st["kvv"])])
+    meals = sum(len(d.get("meals") or []) for d in (plan.get("days") or []))
+    if meals:
+        rows.append([Paragraph("Meals", st["kv"]),
+                     Paragraph(str(meals), st["kvv"])])
     t = Table(rows, colWidths=[42 * mm, 62 * mm], hAlign="CENTER")
     t.setStyle(TableStyle([
         ("SPAN", (0, 0), (1, 0)),
@@ -224,17 +236,12 @@ def build(plan: dict) -> bytes:
             Spacer(1, 26 * mm),
             Paragraph(f'<font color="#B7CE8F">Week of '
                       f'{_pretty(plan.get("week_start", ""))}</font>', st["sub"])]
-    who = _ascii((plan.get("basics") or {}).get("name", ""))
-    if who:
-        flow += [Spacer(1, 4 * mm),
-                 Paragraph(f'<font color="#F2C14E">Prepared for {who}</font>',
-                           st["sub"])]
 
     # NextPageTemplate BEFORE the break, or reportlab keeps using the cover
     # template for the whole document and every page comes out dark green with
     # the leaf circle on it.
     flow += [NextPageTemplate("page"), PageBreak(),
-             Spacer(1, 8 * mm), _basics_card(plan, st)]
+             Spacer(1, 8 * mm), _week_card(plan, st)]
     if plan.get("summary"):
         flow += [Spacer(1, 12 * mm),
                  Paragraph("Your week at a glance", st["h2"]),
