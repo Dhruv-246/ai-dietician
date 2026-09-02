@@ -23,6 +23,7 @@ import reply_shape              # noqa: E402
 import chat_engine              # noqa: E402
 import chat_guard               # noqa: E402
 import chat_session             # noqa: E402
+import diet_plan as dpl        # noqa: E402
 import chat_store               # noqa: E402
 import thread_machine as tm     # noqa: E402
 
@@ -1624,6 +1625,147 @@ def _shape(chunks, cap=32):
     return "".join(out), sh
 
 
+# ------------------------------------------------------------- diet plan --
+def _meal(items, slot="Lunch", weekday="Monday"):
+    return {"days": [{"day": 1, "weekday": weekday,
+                      "meals": [{"slot": slot, "items": items}]}]}
+
+
+def test_diet_plan_validation():
+    """The validator is the only thing standing between a model slip and a
+    document the user follows for a week. These are the cases that actually
+    came up against the live model."""
+    def bad(items, diet="vegetarian", allergies=()):
+        return [p["msg"] for p in dpl.check(_meal(items), diet, list(allergies))]
+
+    ck("meat rejected for vegetarian", bad("Chicken curry, rice"))
+    ck("egg rejected for vegetarian", bad("Egg bhurji, toast"))
+    ck("meat allowed for non-vegetarian",
+       not bad("Chicken curry, rice", "non-vegetarian"))
+    ck("egg allowed for eggetarian", not bad("Egg bhurji", "eggetarian"))
+    ck("meat still rejected for eggetarian", bad("Fish curry", "eggetarian"))
+    ck("dairy rejected for vegan", bad("Paneer tikka", "vegan"))
+    ck("dairy fine for vegetarian", not bad("Paneer tikka", "vegetarian"))
+    ck("onion rejected for jain", bad("Onion sabzi", "jain vegetarian"))
+
+    # The model names plant milks and millet flours precisely; punishing that
+    # precision made it retry a correct plan until it ran out of attempts.
+    ck("coconut milk is not dairy", not bad("Poha with coconut milk", "vegan"))
+    ck("almond milk is not dairy", not bad("Warm almond milk", "vegan"))
+    ck("plain milk still is", bad("Warm milk with haldi", "vegan"))
+    ck("jowar roti is not wheat",
+       not bad("Jowar roti (2), dal", "vegan", ["gluten"]))
+    ck("plain roti still is", bad("Roti (2), dal", "vegan", ["gluten"]))
+    ck("peanut butter is not dairy butter", not bad("Peanut butter toast", "vegan"))
+    ck("gluten-free oats are not gluten",
+       not bad("Gluten-free oats porridge", "vegan", ["gluten"]))
+
+    # ...but a qualifier must belong to the same food.
+    ck("qualifier does not cross a comma",
+       bad("Coconut chutney, milk (1 glass)", "vegan"))
+
+    ck("eggplant is not egg", not bad("Eggplant bharta"))
+    ck("plural allergy matches singular food",
+       bad("Peanut chikki", "vegetarian", ["peanuts"]))
+    ck("allergy matches inside a compound word",
+       bad("Milkshake", "vegetarian", ["milk"]))
+    ck("allergy category expands to its members",
+       bad("Curd rice", "vegetarian", ["dairy"]))
+    ck("nut category expands to hindi names",
+       bad("Kaju curry", "vegetarian", ["nuts"]))
+    ck("clean meal passes everything",
+       not bad("Moong dal chilla with green chutney", "vegan",
+               ["dairy", "gluten", "nuts"]))
+
+    ck("problems carry a day and meal index",
+       all({"day", "meal", "msg"} <= set(p)
+           for p in dpl.check(_meal("Chicken curry"), "veg", [])))
+
+
+def test_diet_plan_shape_and_dates():
+    ck("a one-day plan is rejected",
+       any("7 days" in p for p in dpl.shape_ok(_meal("Dal chawal"))))
+    empty = {"days": [{"day": i + 1, "meals": []} for i in range(7)]}
+    ck("days without meals are rejected", len(dpl.shape_ok(empty)) >= 7)
+
+    import datetime as _dt
+    ck("week_start is a Monday",
+       _dt.date.fromisoformat(dpl.week_start(_dt.date(2026, 9, 3))).weekday() == 0)
+    ck("week_start of a Monday is itself",
+       dpl.week_start(_dt.date(2026, 9, 7)) == "2026-09-07")
+    ck("week_start of a Sunday is that week's Monday",
+       dpl.week_start(_dt.date(2026, 9, 13)) == "2026-09-07")
+    ck("next_week_start is seven days on",
+       dpl.next_week_start(_dt.date(2026, 9, 13)) == "2026-09-14")
+
+
+def test_diet_plan_note_hygiene():
+    """The repair pass rewrites meals, and the user never saw the draft it is
+    repairing. A note reading 'Replaced ghee with coconut oil' is incoherent
+    to the only person who reads it."""
+    c = dpl._clean_note
+    ck("leading 'Replaced X with Y' is stripped",
+       c("Replaced ghee with coconut oil. Total: ~280 kcal") == "Total: ~280 kcal")
+    ck("'instead of' aside is stripped",
+       c("Gluten-free and light (instead of wheat roti). Total: ~220 kcal")
+       == "Gluten-free and light. Total: ~220 kcal")
+    ck("no space left before the full stop",
+       " ." not in c("Uses jowar rather than wheat. Total: ~180 kcal"))
+    ck("an ordinary note is untouched",
+       c("Iron-rich and easy to digest. Total: ~290 kcal")
+       == "Iron-rich and easy to digest. Total: ~290 kcal")
+
+
+def test_plan_change_prefilter():
+    """Loose on purpose: a false positive costs one cheap classifier call, a
+    false negative silently ignores what the user asked for."""
+    ck("explicit change request is caught",
+       dpl.maybe_plan_change("monday ko daal available nahi h toh change krdo"))
+    ck("dislike is caught",
+       dpl.maybe_plan_change("breakfast pasand nahi aaya, kuch aur do"))
+    ck("pdf edit request is caught",
+       dpl.maybe_plan_change("pdf me sunday ka khana change kar do"))
+    ck("a greeting is not", not dpl.maybe_plan_change("kya haal hai"))
+    ck("a general question is not",
+       not dpl.maybe_plan_change("mera weight kaise kam hoga"))
+    ck("a very short message is not", not dpl.maybe_plan_change("ok"))
+
+
+def test_plan_pdf_renders():
+    """The PDF must build from a plan dict with no network and no fonts
+    beyond the built-ins."""
+    try:
+        import plan_pdf
+    except Exception as exc:
+        ck("plan_pdf imports", False, f"{type(exc).__name__}: {exc}")
+        return
+    plan = {
+        "week_start": "2026-09-07",
+        "summary": "A calm week - light dinners and no wheat.",
+        "basics": {"name": "Ananya Sharma", "age": 29, "gender": "Female",
+                   "height": "163 cm", "weight": "71 kg"},
+        "days": [{"day": i + 1, "weekday": dpl.WEEKDAYS[i],
+                  "date": f"2026-09-{7 + i:02d}",
+                  "meals": [{"slot": "Breakfast", "time": "08:00",
+                             "items": "Poha with peanuts",
+                             "note": "Light. Total: ~220 kcal"}]}
+                 for i in range(7)]}
+    try:
+        data = plan_pdf.build(plan)
+    except Exception as exc:
+        ck("plan_pdf builds a document", False, f"{type(exc).__name__}: {exc}")
+        return
+    ck("plan_pdf builds a document", data[:4] == b"%PDF" and len(data) > 4000,
+       f"{len(data)} bytes")
+    ck("devanagari is folded, not drawn as boxes",
+       plan_pdf._ascii("दाल chawal") == "chawal")
+    ck("an em dash keeps its spaces",
+       plan_pdf._ascii("bloating—common") == "bloating - common")
+    ck("iso dates are humanised", plan_pdf._pretty("2026-09-07") == "07 Sep 2026")
+    ck("a bad date degrades instead of raising",
+       plan_pdf._pretty("not a date") == "not a date")
+
+
 def test_reply_shape():
     # Tokens arrive in small pieces, so every rule has to hold mid-chunk.
     spoken, sh = _shape(["अच्छा", ", दिल्ली", " में! और work", " क्या करते हैं", " आप?"])
@@ -1771,6 +1913,9 @@ def main():
                test_no_advice_no_promises, test_capture_is_not_node_scoped,
                test_register_and_banned_words, test_offtopic_bridge,
                test_reply_shape,
+               test_diet_plan_validation, test_diet_plan_shape_and_dates,
+               test_diet_plan_note_hygiene, test_plan_change_prefilter,
+               test_plan_pdf_renders,
                test_prompt_invariants,
                test_bedrock_falls_back):
         fn()

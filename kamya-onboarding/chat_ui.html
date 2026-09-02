@@ -41,6 +41,8 @@
   }
   .sheet button:hover,.sheet button:focus-visible{background:#F0F2F5;outline:none}
   .sheet .danger{color:#B4402F}
+  .sheet button .hint{display:block;font-size:12px;color:#667781;margin-top:2px}
+  .sheet button[disabled]{opacity:.55;cursor:default}
   [hidden]{display:none !important}
   .ava{width:40px;height:40px;border-radius:50%;object-fit:cover;flex:none;
        background:#0b6b58}
@@ -131,6 +133,8 @@
 
 <button class="scrim" id="scrim" hidden aria-label="Close menu"></button>
 <div class="sheet" id="sheet" hidden role="menu">
+  <button id="planBtn" role="menuitem">Diet plan (PDF)
+    <span class="hint" id="planHint"></span></button>
   <button id="logoutBtn" class="danger" role="menuitem">Log out</button>
 </div>
 
@@ -201,13 +205,69 @@ function menu(open){
   sheet.hidden = !open;
   scrim.hidden = !open;
   menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
-  if (open) document.getElementById('logoutBtn').focus();
+  if (open){ document.getElementById('planBtn').focus(); refreshPlanHint(); }
 }
 menuBtn.addEventListener('click', () => menu(sheet.hidden));
 scrim.addEventListener('click', () => menu(false));
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !sheet.hidden){ menu(false); menuBtn.focus(); }
 });
+// ---- diet plan ----
+// The first build takes about a minute (several model calls, then a
+// validation pass), so the click cannot just be a link -- the user would sit
+// on a dead tab. Instead: say it is being made, close the menu, and download
+// when it lands. Mira posts the "ready" message herself, server side, so it
+// survives a refresh.
+const planBtn  = document.getElementById('planBtn');
+const planHint = document.getElementById('planHint');
+let planBusy = false;
+
+async function refreshPlanHint(){
+  try {
+    const r = await fetch(`/plan/status?uid=${encodeURIComponent(UID)}`);
+    if (!r.ok) return;
+    const j = await r.json();
+    planHint.textContent = j.building ? 'ban raha hai...'
+                         : j.ready    ? 'is hafte ka plan taiyaar hai'
+                         :              'pehli baar mein ~1 minute lagega';
+  } catch (e) {}
+}
+
+planBtn.addEventListener('click', async () => {
+  if (planBusy) return;
+  planBusy = true;
+  planBtn.disabled = true;
+  planHint.textContent = 'ban raha hai...';
+  try {
+    const r = await fetch(`/plan.pdf?uid=${encodeURIComponent(UID)}`);
+    if (!r.ok){
+      let msg = 'Plan abhi ban nahi paaya. Thodi der baad try kijiye.';
+      try { msg = (await r.json()).error || msg; } catch (e) {}
+      planHint.textContent = msg;
+      return;
+    }
+    const blob = await r.blob();
+    const url  = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (r.headers.get('Content-Disposition') || '')
+                   .match(/filename="([^"]+)"/)?.[1] || 'diet-plan.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    planHint.textContent = 'download ho gaya';
+    menu(false);
+    // Only present when the plan was built just now. Mira also wrote it into
+    // the thread server-side, so a refresh shows the same message.
+    const said = r.headers.get('X-Plan-Message');
+    if (said) bubble('assistant', said);
+  } catch (e) {
+    planHint.textContent = 'Network problem. Dobara try kijiye.';
+  } finally {
+    planBusy = false;
+    planBtn.disabled = false;
+  }
+});
+
 document.getElementById('logoutBtn').addEventListener('click', () => {
   // Go to the web app's SIGN-OUT page, not /login. Firebase keeps the session
   // in the browser, so /login saw a still-authenticated user and forwarded

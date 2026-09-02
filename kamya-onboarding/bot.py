@@ -105,7 +105,7 @@ from datetime import datetime, timezone
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               RedirectResponse)
+                               RedirectResponse, Response)
 
 import consolidate
 import chat_engine
@@ -121,6 +121,18 @@ import rag
 import rag_query
 import stt_vocab
 import thread_machine
+
+# The plan feature needs reportlab. If that wheel is missing the server must
+# still boot and serve chat and calls -- a broken PDF button is a far smaller
+# failure than a server that will not start.
+try:
+    import diet_plan
+    import plan_pdf
+except Exception as _plan_exc:            # pragma: no cover - import guard
+    diet_plan = None
+    plan_pdf = None
+    print(f"[bot] diet plan feature disabled: "
+          f"{type(_plan_exc).__name__}: {_plan_exc}", flush=True)
 
 # Local dev loads a .env next to this file. On a host (Railway/Render/etc.) there
 # is no .env — the platform injects the variables into the environment directly.
@@ -1682,6 +1694,13 @@ async def run_livekit_bot(room_name: str, system_prompt: str, *,
                 _log(f"memory saved room={room_name} session={run_id} "
                      f"ops={len(patch['ops'])} applied={applied} rejected={rejected} "
                      f"closed={len(invalidations)} open_loops={len(patch['open_loops'])}")
+
+                # The onboarding call is the moment we finally know their
+                # diet, allergies and conditions -- everything the plan needs.
+                # Build it now, in the background, so the plan is waiting when
+                # they open chat instead of costing them a minute at the menu.
+                if mode == "onboarding" and firebase_uid:
+                    asyncio.create_task(_plan_after_onboarding(firebase_uid))
             except Exception as exc:
                 _log(f"consolidation failed room={room_name} session={run_id} "
                      f"(transcript kept, replayable): {exc}")
@@ -2000,7 +2019,215 @@ async def chat_send(request: Request):
     _log(f"chat turn uid={uid[:8]} lane={result.get('lane')} "
          f"stage={result.get('stage')} words={result.get('words')} "
          f"bubbles={len(result.get('bubbles') or [])}")
+    # "Monday ko daal available nahi hai" should update the plan. Rebuilding a
+    # week takes about a minute, so it runs AFTER the reply has gone out --
+    # the user gets Mira's answer at normal speed and the new plan lands a
+    # minute later with a message of its own.
+    asyncio.create_task(_maybe_update_plan(uid, profile, memory, text))
     return {"bubbles": result.get("bubbles") or [], "safety": result.get("safety")}
+
+
+async def _maybe_update_plan(uid, profile, memory, text):
+    """Background: did that message ask for a change to the written plan?"""
+    if diet_plan is None or not diet_plan.enabled():
+        return
+    if not diet_plan.maybe_plan_change(text):
+        return                      # cheap gate, no model call
+    if uid in _PLAN_BUILDING:
+        return                      # a build is already running
+    try:
+        plan = await diet_plan.load(uid, log=_log)
+        if not plan or plan.get("week_start") != diet_plan.week_start():
+            return                  # nothing to amend yet
+        verdict = await diet_plan.wants_change(text)
+        if not verdict.get("change"):
+            return
+        note = str(verdict.get("instruction") or text)[:400]
+        _log(f"plan: chat-driven update uid={uid[:8]} -- {note}")
+        async with _plan_lock(uid):
+            _PLAN_BUILDING.add(uid)
+            try:
+                updated, reply = await diet_plan.amend(plan, note, log=_log)
+                await diet_plan.save(uid, updated, log=_log)
+            finally:
+                _PLAN_BUILDING.discard(uid)
+        said = reply or "Aapka diet plan update kar diya hai."
+        await _plan_announce(
+            uid, profile, memory,
+            f"{said} Menu se nayi PDF download kar lijiye.")
+    except Exception as exc:
+        _log(f"plan chat-update failed uid={uid[:8]}: "
+             f"{type(exc).__name__}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Weekly diet plan
+#
+# The PLAN (JSON) is what we store; the PDF is rendered on every download.
+# A stored PDF would go stale the moment a meal changed and would have to be
+# rewritten on every edit -- storing the data and rendering the document is
+# both smaller and always current.
+# ---------------------------------------------------------------------------
+_PLAN_LOCKS: dict = {}
+_PLAN_BUILDING: set = set()
+
+
+def _plan_lock(uid: str):
+    lock = _PLAN_LOCKS.get(uid)
+    if lock is None:
+        lock = _PLAN_LOCKS[uid] = asyncio.Lock()
+    return lock
+
+
+async def _ensure_plan(uid, profile, memory, *, week="", force=False,
+                       notes="", announce=""):
+    """Return the user's plan for `week`, generating it only if needed.
+
+    Generation takes a minute and several model calls, so it is guarded by a
+    per-user lock: two taps on 'Diet plan' must not start two generations.
+    """
+    week = week or diet_plan.week_start()
+    async with _plan_lock(uid):
+        if not force:
+            existing = await diet_plan.load(uid, log=_log)
+            if existing and existing.get("week_start") == week:
+                return existing, False
+        _log(f"plan: generating uid={uid[:8]} week={week} force={force}")
+        _PLAN_BUILDING.add(uid)
+        try:
+            plan = await diet_plan.generate(profile, memory, start=week,
+                                            extra_notes=notes, log=_log)
+            await diet_plan.save(uid, plan, log=_log)
+        finally:
+            _PLAN_BUILDING.discard(uid)
+        if announce:
+            await _plan_announce(uid, profile, memory, announce)
+        return plan, True
+
+
+async def _plan_after_onboarding(uid: str):
+    """First plan, built right after the onboarding call is consolidated."""
+    if diet_plan is None or not diet_plan.enabled():
+        return
+    try:
+        ok, profile, memory = _chat_eligible(uid)
+        if not ok:
+            _log(f"plan after onboarding: uid={uid[:8]} not eligible yet")
+            return
+        existing = await diet_plan.load(uid, log=_log)
+        if existing and existing.get("week_start") == diet_plan.week_start():
+            return
+        await _ensure_plan(
+            uid, profile, memory,
+            announce=("Aur haan -- aapka is hafte ka diet plan bhi taiyaar "
+                      "hai. Upar menu mein 'Diet plan (PDF)' se download kar "
+                      "lijiye."))
+        _log(f"plan after onboarding ready uid={uid[:8]}")
+    except Exception as exc:
+        _log(f"plan after onboarding failed uid={uid[:8]}: "
+             f"{type(exc).__name__}: {exc}")
+
+
+async def _plan_announce(uid, profile, memory, text):
+    """Put a message from Mira into the thread, exactly as if she had sent it.
+
+    Written into the SESSION (and persisted) rather than pushed only to the
+    open tab, so it is still there after a refresh or on the user's other
+    device -- the announcement is part of the conversation, not a toast.
+    """
+    try:
+        async with chat_session.STORE.lock(uid):
+            sess, is_new = chat_session.STORE.get_or_open(uid, profile, memory)
+            if is_new:
+                row = await chat_store.load(uid, log=_log)
+                if row and not row.get("closed"):
+                    chat_store.restore(sess, row)
+            sess.add("assistant", text)
+            await chat_store.save(sess, log=_log)
+    except Exception as exc:
+        _log(f"plan announce failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
+
+
+@app.get("/plan/status")
+async def plan_status(uid: str = ""):
+    """Does a current plan exist? Lets the UI show the right menu label
+    without paying for a generation."""
+    ok, _p, _m = _chat_eligible(uid)
+    if not ok:
+        return JSONResponse({"error": CHAT_LOCKED}, status_code=403)
+    if diet_plan is None:
+        return JSONResponse({"error": "Plan feature unavailable."},
+                            status_code=503)
+    plan = await diet_plan.load(uid, log=_log)
+    week = diet_plan.week_start()
+    return {"ready": bool(plan and plan.get("week_start") == week),
+            "building": uid in _PLAN_BUILDING,
+            "week_start": (plan or {}).get("week_start", ""),
+            "current_week": week}
+
+
+@app.get("/plan.pdf")
+async def plan_pdf_download(uid: str = ""):
+    ok, profile, memory = _chat_eligible(uid)
+    if not ok:
+        return JSONResponse({"error": CHAT_LOCKED}, status_code=403)
+    if plan_pdf is None or diet_plan is None:
+        return JSONResponse({"error": "Plan feature unavailable."},
+                            status_code=503)
+    announce = ("Aapka is hafte ka diet plan ready hai! PDF download ho gaya "
+                "hai. Koi bhi din ka khaana suit na kare toh mujhe bata "
+                "dijiye, main change kar dungi.")
+    try:
+        plan, made = await _ensure_plan(uid, profile, memory,
+                                        announce=announce)
+    except Exception as exc:
+        _log(f"plan generate failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
+        return JSONResponse(
+            {"error": "Plan abhi ban nahi paaya. Thodi der baad try kijiye."},
+            status_code=503)
+    try:
+        data = plan_pdf.build(plan)
+    except Exception as exc:
+        _log(f"plan render failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
+        return JSONResponse({"error": "PDF banane mein problem hui."},
+                            status_code=500)
+    name = re.sub(r"[^A-Za-z0-9]+", "-",
+                  str((plan.get("basics") or {}).get("name") or "mira")).strip("-")
+    fname = f"{name or 'mira'}-diet-plan-{plan.get('week_start','')}.pdf"
+    _log(f"plan.pdf served uid={uid[:8]} week={plan.get('week_start')} "
+         f"generated={made} bytes={len(data)}")
+    headers = {"Content-Disposition": f'attachment; filename="{fname}"',
+               "Cache-Control": "no-store"}
+    if made:
+        # The client appends this as a bubble. It is ALSO written into the
+        # session by _plan_announce, so a refresh shows the same message
+        # rather than losing it -- the header just saves a history refetch.
+        headers["X-Plan-Message"] = announce
+        headers["Access-Control-Expose-Headers"] = "X-Plan-Message"
+    return Response(content=data, media_type="application/pdf",
+                    headers=headers)
+
+
+@app.post("/plan/regenerate")
+async def plan_regenerate(request: Request):
+    body = await request.json()
+    uid = str((body or {}).get("uid") or "").strip()
+    notes = str((body or {}).get("notes") or "").strip()[:600]
+    week = str((body or {}).get("week") or "").strip()
+    ok, profile, memory = _chat_eligible(uid)
+    if not ok:
+        return JSONResponse({"error": CHAT_LOCKED}, status_code=403)
+    if diet_plan is None:
+        return JSONResponse({"error": "Plan feature unavailable."},
+                            status_code=503)
+    try:
+        plan, _made = await _ensure_plan(uid, profile, memory, week=week,
+                                          force=True, notes=notes)
+    except Exception as exc:
+        _log(f"plan regen failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
+        return JSONResponse({"error": "Plan update nahi ho paaya."},
+                            status_code=503)
+    return {"ok": True, "week_start": plan.get("week_start", "")}
 
 
 @app.get("/chat/sessions")
@@ -2046,9 +2273,59 @@ async def _chat_reaper():
                     _log(f"chat close failed {sess.session_id}: "
                          f"{type(exc).__name__}: {exc}")
                 chat_session.STORE.drop(uid)
+            await _weekly_plan_sweep()
         except Exception as exc:
             _log(f"chat reaper error: {type(exc).__name__}: {exc}")
         await asyncio.sleep(60)
+
+
+# Sunday night: build next week's plan before the user wakes up on Monday.
+# Guarded by a done-marker rather than a timer, so a restart or a redeploy at
+# 22:30 on Sunday does not either skip the sweep or run it twice.
+_PLAN_SWEEP_DONE = set()
+PLAN_SWEEP_HOUR = int(os.getenv("PLAN_SWEEP_HOUR", "21"))     # local server time
+PLAN_SWEEP_LIMIT = int(os.getenv("PLAN_SWEEP_LIMIT", "50"))
+
+
+async def _weekly_plan_sweep():
+    """Refresh every active user's plan for the coming week.
+
+    Only for people who already HAVE a plan -- a first plan is something the
+    user asks for, not something we generate for everyone every Sunday.
+    """
+    if diet_plan is None or not diet_plan.enabled():
+        return
+    now = datetime.now()
+    if now.weekday() != 6 or now.hour < PLAN_SWEEP_HOUR:   # 6 = Sunday
+        return
+    tag = now.strftime("%Y-%m-%d")
+    if tag in _PLAN_SWEEP_DONE:
+        return
+    _PLAN_SWEEP_DONE.add(tag)
+    _PLAN_SWEEP_DONE.intersection_update({tag})            # keep it to one entry
+
+    week = diet_plan.next_week_start()
+    try:
+        uids = await diet_plan.uids_with_plans(log=_log)
+    except Exception as exc:
+        _log(f"plan sweep: could not list users: {type(exc).__name__}: {exc}")
+        return
+    _log(f"plan sweep starting for week {week}: {len(uids)} user(s)")
+    done = 0
+    for uid in uids[:PLAN_SWEEP_LIMIT]:
+        ok, profile, memory = _chat_eligible(uid)
+        if not ok:
+            continue
+        try:
+            await _ensure_plan(
+                uid, profile, memory, week=week, force=True,
+                announce=("Agle hafte ka aapka naya diet plan taiyaar hai. "
+                          "Menu se PDF download kar lijiye."))
+            done += 1
+        except Exception as exc:
+            _log(f"plan sweep failed uid={uid[:8]}: {type(exc).__name__}: {exc}")
+        await asyncio.sleep(2)     # do not stampede the model
+    _log(f"plan sweep finished: {done} plan(s) refreshed for week {week}")
 
 
 @app.on_event("startup")
