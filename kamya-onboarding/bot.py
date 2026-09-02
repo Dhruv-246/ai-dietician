@@ -1891,7 +1891,36 @@ async def healthz():
         "llm": llm_client.provider(),
         "bedrock_model": llm_client.bedrock_model("chat") or None,
         "aws_extra": AWSBedrockLLMService is not None,
+        "plan": await _plan_health(),
     }
+
+
+async def _plan_health() -> dict:
+    """Can this process actually store a diet plan?
+
+    Worth reporting, because failing to store one is INVISIBLE from the
+    outside: plans still generate and still download, they just regenerate --
+    and re-announce -- every time. A boolean here turns that into something
+    you can check after a deploy instead of noticing it from user complaints.
+    """
+    if diet_plan is None:
+        return {"feature": False, "why": "reportlab missing"}
+    if not diet_plan.enabled():
+        return {"feature": True, "storage": False,
+                "why": "SUPABASE_URL / SUPABASE_KEY not set"}
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(diet_plan._url(), headers=diet_plan._headers(),
+                            params={"select": "firebase_uid", "limit": "1"})
+        if r.status_code < 300:
+            return {"feature": True, "storage": True,
+                    "table": diet_plan.TABLE}
+        return {"feature": True, "storage": False,
+                "why": f"HTTP {r.status_code}: {r.text[:120]}"}
+    except Exception as exc:
+        return {"feature": True, "storage": False,
+                "why": f"{type(exc).__name__}: {exc}"[:160]}
 
 
 # --------------------------------------------------------------------------- #
