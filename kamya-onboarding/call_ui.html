@@ -155,7 +155,7 @@
 
     // Step-3 only: touch points to view what Mira remembers + to log out.
     // (Logout runs on the web app origin, where the Firebase session lives.)
-    const WEB_APP_URL = "https://web-production-45f0d.up.railway.app";
+    const WEB_APP_URL = "{{WEB_APP_URL}}";   // substituted server-side
     if (cfg.cls === "ongoing") {
       if (uid) {
         const m = $("memLink");

@@ -10,6 +10,9 @@ All context-building, LLM, and history logic lives in the existing backend
 (src.conversation.run_turn). The frontend only does audio I/O (STT/TTS) and one
 HTTP call — no backend logic is duplicated in the browser.
 """
+import json
+import os
+
 from flask import Flask, jsonify, request, send_from_directory
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
@@ -22,6 +25,27 @@ from src.data import repositories
 app = Flask(__name__, static_folder="static", static_url_path="")
 
 AI_NAME = "Mira"
+
+
+# The voice-call service lives on its own host, and its URL was hardcoded in
+# two JavaScript files. Moving either service to a new host therefore needed a
+# code change and a redeploy, which is exactly the sort of thing that gets
+# missed halfway through a migration. Served from the environment instead,
+# with today's host as the default so nothing changes until it is set.
+AGENT_URL = os.getenv("AGENT_URL",
+                      "https://ai-dietician-production.up.railway.app/")
+
+
+@app.get("/config.js")
+def config_js():
+    """Runtime config for the static front-end.
+
+    A classic script, deliberately: it must run before the module scripts that
+    read it, and modules are deferred.
+    """
+    body = "window.__AGENT_URL = %s;\n" % json.dumps(AGENT_URL)
+    return app.response_class(body, mimetype="application/javascript",
+                              headers={"Cache-Control": "no-store"})
 
 
 @app.get("/")

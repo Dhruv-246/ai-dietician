@@ -31,7 +31,8 @@ const TOTAL = 6;
 // The voice onboarding-call service (separate Railway service). After manual
 // onboarding we hand off here with the user's Firebase uid so Mira loads their
 // profile from the same sheet and greets them by name.
-const ONBOARDING_CALL_URL = "https://ai-dietician-production.up.railway.app/";
+const ONBOARDING_CALL_URL = window.__AGENT_URL
+  || "https://ai-dietician-production.up.railway.app/";
 
 /* ---------- helpers ---------- */
 function esc(s) {

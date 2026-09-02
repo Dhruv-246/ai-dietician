@@ -9,7 +9,8 @@
  * onboarding_call_done). `uid` is the Firebase uid, handed to the call so it
  * loads that user's profile + long-term memory.
  */
-export const AGENT_URL = "https://ai-dietician-production.up.railway.app/";
+export const AGENT_URL = window.__AGENT_URL
+  || "https://ai-dietician-production.up.railway.app/";
 
 export function landingTarget(info, uid) {
   const yes = (v) => info && String(v).toUpperCase() === "TRUE";

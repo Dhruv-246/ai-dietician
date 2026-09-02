@@ -1787,6 +1787,10 @@ async def call_ui(request: Request):
              f"-- serving the call")
 
     html = (_HERE / "call_ui.html").read_text(encoding="utf-8")
+    # WEB_APP_URL was hardcoded here too. Substituted like chat_ui's logout
+    # link, so moving the web app to a new host is an env change, not a code
+    # change.
+    html = html.replace("{{WEB_APP_URL}}", WEB_APP_URL.rstrip("/"))
     return HTMLResponse(html.replace("{{AVATAR_V}}", _avatar_version()))
 
 
