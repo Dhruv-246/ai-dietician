@@ -494,7 +494,11 @@ _PLAN_WORDS = ["plan", "chart", "pdf", "diet", "khana", "khaana", "meal",
 _CHANGE_WORDS = ["change", "badal", "badl", "replace", "hata", "nahi mil",
                  "available nahi", "nahi hai", "nahi h", "pasand nahi",
                  "bore", "alag", "kuch aur", "swap", "update", "skip",
-                 "nahi kha", "allergy", "band kar", "chhod"]
+                 "nahi kha", "allergy", "band kar", "chhod", "nahi khani",
+                 "nahi khaunga", "nahi khaungi", "shuru kar", "start kar",
+                 "heavy", "halka", "bhaari", "zyada ho", "kam kar",
+                 "add kar", "daal do", "de dijiye", "chahiye", "mat do",
+                 "nahi chahiye", "ho jata", "problem"]
 _DAY_WORDS = [d.lower() for d in WEEKDAYS] + ["somvar", "mangal", "budh",
               "guru", "shukra", "shani", "ravi", "kal", "aaj", "tomorrow",
               "today", "weekend"]
@@ -507,9 +511,20 @@ def maybe_plan_change(text: str) -> bool:
     t = _norm(text)
     if not t or len(t) < 6:
         return False
-    hits = sum(any(w in t for w in group)
+    # ONE group is enough.
+    #
+    # This asked for two, and silently dropped real requests: "mujhe roti
+    # nahi khani ab" and "breakfast heavy lag raha hai, kuch halka do" both
+    # failed the gate and never reached the classifier. The classifier itself
+    # turns out to be accurate -- it rejects feedback, questions and thanks
+    # cleanly -- so the gate should only be filtering out messages with no
+    # food or change content at all, not adjudicating.
+    #
+    # The cost of being loose is one small background call on a message that
+    # was never about the plan. The cost of being strict is the user asking
+    # for a change and nothing happening.
+    return any(any(w in t for w in group)
                for group in (_PLAN_WORDS, _CHANGE_WORDS, _DAY_WORDS))
-    return hits >= 2
 
 
 _CHANGE_SYSTEM = """\
@@ -518,12 +533,22 @@ Decide whether the user is asking to CHANGE their written diet plan.
 Return JSON only:
 {"change": true|false, "scope": "day"|"meal"|"week", "instruction": "..."}
 
-`change` is true only for a request to alter the plan document -- a food they
-cannot get, do not like, or must avoid; a day that does not work; a timing
-that is wrong.
+`change` is true for a request to alter the plan -- a food they cannot get,
+do not like, or must avoid; a day that does not work; a timing that is wrong.
 
-It is FALSE for: asking what is in the plan, general food questions, saying a
-meal WAS good or bad after eating it, small talk, or anything unrelated.
+It is ALSO true when they STATE a change in what they eat, even as plain
+information rather than a request. "Main ab egg khana shuru kar raha hoon",
+"mujhe peanuts se allergy hai", "ab main non-veg chhod raha hoon" all change
+what belongs in the plan. They should not have to ask twice.
+
+TENSE DECIDES the skip cases. "Kal ka dinner miss ho gaya" is a report about
+a day that has passed and changes nothing. "Sunday ko main bahar hoon, dinner
+skip" is about a day still ahead, and the plan for that day should change.
+
+It is FALSE for: asking what is in the plan, general food or nutrition
+questions, saying a meal WAS good or bad after eating it, reporting a meal
+they already missed, worrying about progress, small talk, or anything
+unrelated to what the plan should contain.
 
 `instruction` is one plain sentence a dietician could act on, naming the day
 and meal if the user did. Write it in English.

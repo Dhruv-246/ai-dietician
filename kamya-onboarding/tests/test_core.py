@@ -1717,18 +1717,52 @@ def test_diet_plan_note_hygiene():
 
 
 def test_plan_change_prefilter():
-    """Loose on purpose: a false positive costs one cheap classifier call, a
-    false negative silently ignores what the user asked for."""
-    ck("explicit change request is caught",
-       dpl.maybe_plan_change("monday ko daal available nahi h toh change krdo"))
-    ck("dislike is caught",
-       dpl.maybe_plan_change("breakfast pasand nahi aaya, kuch aur do"))
-    ck("pdf edit request is caught",
-       dpl.maybe_plan_change("pdf me sunday ka khana change kar do"))
+    """The gate in front of the classifier must not adjudicate.
+
+    It asked for two of three word groups and silently dropped real requests:
+    "mujhe roti nahi khani ab" and "breakfast heavy lag raha hai, kuch halka
+    do" never reached the classifier at all. The classifier itself rejects
+    feedback, questions and small talk cleanly, so the gate's only job is to
+    skip messages with no food or change content -- a false positive costs
+    one small background call, a false negative loses what the user asked
+    for."""
+    must_pass = [
+        "monday ko daal available nahi h toh change krdo",
+        "mujhe roti nahi khani ab, band kar do",
+        "breakfast bahut heavy lag raha hai, kuch halka do",
+        "main ab egg khana shuru kar raha hoon",
+        "ab main non-veg chhod raha hoon",
+        "mujhe peanuts se allergy hai",
+        "sunday ko main bahar hoon, dinner skip",
+        "breakfast pasand nahi aaya, kuch aur do",
+        "pdf me sunday ka khana change kar do",
+    ]
+    for m in must_pass:
+        ck(f"gate lets through: {m[:38]}", dpl.maybe_plan_change(m))
+
     ck("a greeting is not", not dpl.maybe_plan_change("kya haal hai"))
-    ck("a general question is not",
-       not dpl.maybe_plan_change("mera weight kaise kam hoga"))
+    ck("a nutrition question is not",
+       not dpl.maybe_plan_change("roti me kitni calorie hoti hai"))
     ck("a very short message is not", not dpl.maybe_plan_change("ok"))
+
+
+def test_plan_change_prompt_boundaries():
+    """The judgement calls that took several rounds against the live model to
+    get right. Asserted on the PROMPT, since the classifier itself needs a
+    network -- tests/test_chat_live.py exercises the real decision."""
+    p = dpl._CHANGE_SYSTEM
+    # Matched against whitespace-collapsed text: the source wraps these
+    # sentences, so a literal substring check straddles a newline.
+    flat = " ".join(p.split())
+    ck("a stated preference change counts, not just a request",
+       "even as plain information rather than a request" in flat
+       and "shuru kar raha hoon" in flat)
+    ck("tense separates a future skip from a past miss",
+       "TENSE DECIDES" in p and "already missed" in p)
+    ck("questions about the plan do not change it",
+       "asking what is in the plan" in p)
+    ck("the instruction is written for a dietician to act on",
+       "one plain sentence" in p)
 
 
 def test_plan_pdf_renders():
@@ -2017,6 +2051,7 @@ def main():
                test_diet_plan_validation, test_diet_plan_shape_and_dates,
                test_diet_plan_note_hygiene, test_plan_change_prefilter,
                test_plan_pdf_renders, test_plan_trigger_contract,
+               test_plan_change_prompt_boundaries,
                test_prompt_invariants,
                test_bedrock_falls_back):
         fn()
