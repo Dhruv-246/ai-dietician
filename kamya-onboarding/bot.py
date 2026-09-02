@@ -2036,7 +2036,7 @@ async def _maybe_update_plan(uid, profile, memory, text):
     if uid in _PLAN_BUILDING:
         return                      # a build is already running
     try:
-        plan = await diet_plan.load(uid, log=_log)
+        plan = await diet_plan.load(uid, log=_log) or _PLAN_CACHE.get(uid)
         if not plan or plan.get("week_start") != diet_plan.week_start():
             return                  # nothing to amend yet
         verdict = await diet_plan.wants_change(text)
@@ -2049,6 +2049,7 @@ async def _maybe_update_plan(uid, profile, memory, text):
             try:
                 updated, reply = await diet_plan.amend(plan, note, log=_log)
                 await diet_plan.save(uid, updated, log=_log)
+                _PLAN_CACHE[uid] = updated
             finally:
                 _PLAN_BUILDING.discard(uid)
         said = reply or "Aapka diet plan update kar diya hai."
@@ -2071,6 +2072,19 @@ async def _maybe_update_plan(uid, profile, memory, text):
 _PLAN_LOCKS: dict = {}
 _PLAN_BUILDING: set = set()
 
+# Last plan we built, per user, in this process.
+#
+# Storage is the real answer, but when it is unavailable -- table not created
+# yet, Supabase down -- `load` returns nothing and EVERY download looks like a
+# first build: regenerate, announce, repeat. That is the worst possible
+# failure for this feature, because the user gets a fresh "your plan is
+# ready" message every single time they tap download.
+#
+# This cache makes a repeat download serve the same plan even with no
+# storage at all. It dies with the process, which is exactly why it is a
+# fallback and not the design.
+_PLAN_CACHE: dict = {}
+
 
 def _plan_lock(uid: str):
     lock = _PLAN_LOCKS.get(uid)
@@ -2090,16 +2104,26 @@ async def _ensure_plan(uid, profile, memory, *, week="", force=False,
     async with _plan_lock(uid):
         if not force:
             existing = await diet_plan.load(uid, log=_log)
+            if not existing:
+                existing = _PLAN_CACHE.get(uid)
+                if existing:
+                    _log(f"plan: storage returned nothing uid={uid[:8]}, "
+                         f"using this process's cached plan")
             if existing and existing.get("week_start") == week:
+                _PLAN_CACHE[uid] = existing
                 return existing, False
         _log(f"plan: generating uid={uid[:8]} week={week} force={force}")
         _PLAN_BUILDING.add(uid)
         try:
             plan = await diet_plan.generate(profile, memory, start=week,
                                             extra_notes=notes, log=_log)
-            await diet_plan.save(uid, plan, log=_log)
+            stored = await diet_plan.save(uid, plan, log=_log)
         finally:
             _PLAN_BUILDING.discard(uid)
+        _PLAN_CACHE[uid] = plan
+        if not stored:
+            _log(f"plan: NOT SAVED uid={uid[:8]} -- does the diet_plans "
+                 f"table exist? serving from this process only")
         if announce:
             await _plan_announce(uid, profile, memory, announce)
         return plan, True
@@ -2158,7 +2182,7 @@ async def plan_status(uid: str = ""):
     if diet_plan is None:
         return JSONResponse({"error": "Plan feature unavailable."},
                             status_code=503)
-    plan = await diet_plan.load(uid, log=_log)
+    plan = await diet_plan.load(uid, log=_log) or _PLAN_CACHE.get(uid)
     week = diet_plan.week_start()
     return {"ready": bool(plan and plan.get("week_start") == week),
             "building": uid in _PLAN_BUILDING,

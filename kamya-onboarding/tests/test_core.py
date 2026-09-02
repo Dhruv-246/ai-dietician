@@ -1797,8 +1797,8 @@ def test_plan_trigger_contract():
     async def _announce(uid, profile, memory, text):
         announced.append(text)
     ns = {"asyncio": _aio, "diet_plan": _dp, "_PLAN_LOCKS": {},
-          "_PLAN_BUILDING": set(), "_log": lambda m: None,
-          "_plan_announce": _announce}
+          "_PLAN_BUILDING": set(), "_PLAN_CACHE": {},
+          "_log": lambda m: None, "_plan_announce": _announce}
     for c in chunks:
         exec(c, ns)                                        # noqa: S102
     ensure = ns["_ensure_plan"]
@@ -1843,6 +1843,21 @@ def test_plan_trigger_contract():
             await _aio.gather(*[ensure("u2", {}, {}, week=CUR, announce=SAY)
                                 for _ in range(4)])
             ck("two taps at once build exactly once", built == [CUR])
+
+            # No storage at all -- the diet_plans table not created yet, or
+            # Supabase down. Without the in-process fallback every download
+            # looks like a first build and announces again, which is the
+            # loudest possible way for this to fail.
+            async def _no_store_load(uid, log=None): return None
+            async def _no_store_save(uid, plan, log=None): return False
+            _dp.load, _dp.save = _no_store_load, _no_store_save
+            built.clear(); announced.clear()
+            for _ in range(4):
+                await ensure("u3", {}, {}, week=CUR, announce=SAY)
+            ck("with no storage, it builds once and not four times",
+               built == [CUR], f"built={built}")
+            ck("with no storage, it announces once and not four times",
+               len(announced) == 1, f"announced={len(announced)}")
         _aio.run(run())
     finally:
         _dp.load, _dp.save, _dp.generate = real
